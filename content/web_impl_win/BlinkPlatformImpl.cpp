@@ -13,6 +13,7 @@
 #include "content/web_impl_win/WebFileUtilitiesImpl.h"
 #include "content/web_impl_win/WaitableEvent.h"
 #include "content/web_impl_win/npapi/WebPluginImpl.h"
+#include "content/web_impl_win/npapi/PluginDatabase.h"
 #include "content/resources/MissingImageData.h"
 #include "content/resources/TextAreaResizeCornerData.h"
 #include "content/resources/LocalizedString.h"
@@ -26,6 +27,7 @@
 #include "third_party/WebKit/Source/web/WebStorageNamespaceImpl.h"
 #include "third_party/WebKit/public/platform/WebScrollbarBehavior.h"
 #include "third_party/WebKit/public/platform/WebPluginListBuilder.h"
+#include "third_party/WebKit/Source/platform/plugins/PluginData.h"
 #include "third_party/WebKit/Source/platform/PartitionAllocMemoryDumpProvider.h"
 #include "third_party/WebKit/Source/platform/heap/BlinkGCMemoryDumpProvider.h"
 #include "third_party/WebKit/Source/bindings/core/v8/V8GCController.h"
@@ -136,7 +138,8 @@ void BlinkPlatformImpl::initialize()
     scrt_initialize_thread_safe_statics();
 #endif
     x86_check_features();
-    ::CoInitializeEx(NULL, 0); // COINIT_MULTITHREADED
+    ::CoInitializeEx(nullptr, 0); // COINIT_MULTITHREADED
+    ::OleInitialize(nullptr);
 
     setRuntimeEnabledFeatures();
 
@@ -154,7 +157,7 @@ void BlinkPlatformImpl::initialize()
     const size_t kImageCacheSingleAllocationByteLimit = 64 * 1024 * 1024;
     SkGraphics::SetResourceCacheSingleAllocationByteLimit(kImageCacheSingleAllocationByteLimit);
 
-    platform->startGarbageCollectedThread();
+    platform->startGarbageCollectedThread(30000);
 
     OutputDebugStringW(L"BlinkPlatformImpl::initBlink\n");
 }
@@ -175,6 +178,7 @@ BlinkPlatformImpl::BlinkPlatformImpl()
     m_storageNamespaceIdCount = 1;
     m_lock = new CRITICAL_SECTION();
     m_threadNum = 0;
+    m_gcTimer = nullptr;
     m_ioThread = nullptr;
     m_firstMonotonicallyIncreasingTime = currentTimeImpl(); // (GetTickCount() / 1000.0);
     ::InitializeCriticalSection(m_lock);
@@ -325,6 +329,13 @@ void BlinkPlatformImpl::shutdown()
     delete this;
 }
 
+void BlinkPlatformImpl::garbageCollectedTimer(blink::Timer<BlinkPlatformImpl>*)
+{
+    doGarbageCollected();
+    m_gcTimer->stop();
+    m_gcTimer->startOneShot(30000, FROM_HERE);
+}
+
 void BlinkPlatformImpl::doGarbageCollected()
 {
     //net::gActivatingLoaderCheck->doGarbageCollected(false);
@@ -335,15 +346,17 @@ void BlinkPlatformImpl::doGarbageCollected()
     //     v8::Isolate::GetCurrent()->ContextDisposedNotification(false);
     SkGraphics::PurgeResourceCache();
 
-    mainThread()->postDelayedTask(FROM_HERE, WTF::bind(&BlinkPlatformImpl::doGarbageCollected, this), 30000);
-
 //     String out = String::format("BlinkPlatformImpl::doGarbageCollected: %d %d %d\n", g_v8MemSize, g_blinkMemSize, g_skiaMemSize);
 //     OutputDebugStringA(out.utf8().data());
 }
 
-void BlinkPlatformImpl::startGarbageCollectedThread()
+void BlinkPlatformImpl::startGarbageCollectedThread(double delayMs)
 {
-    mainThread()->postDelayedTask(FROM_HERE, WTF::bind(&BlinkPlatformImpl::doGarbageCollected, this), 30000);
+    if (!m_gcTimer)
+        m_gcTimer = new blink::Timer<BlinkPlatformImpl>(this, &BlinkPlatformImpl::garbageCollectedTimer);
+
+    m_gcTimer->stop();
+    m_gcTimer->startOneShot(delayMs, FROM_HERE);
 }
 
 void BlinkPlatformImpl::closeThread()
@@ -642,9 +655,33 @@ blink::WebClipboard* BlinkPlatformImpl::clipboard()
 // Plugins -------------------------------------------------------------
 void BlinkPlatformImpl::getPluginList(bool refresh, blink::WebPluginListBuilder* builder)
 {
-    builder->addPlugin(blink::WebString::fromUTF8("Shockwave Flash"), blink::WebString::fromUTF8("flashPlugin"), blink::WebString::fromUTF8(".swf"));
-    builder->addMediaTypeToLastPlugin(blink::WebString::fromUTF8("application/x-shockwave-flash"), blink::WebString::fromUTF8("flashPlugin"));
-    builder->addFileExtensionToLastMediaType(blink::WebString::fromUTF8(".swf"));
+//     builder->addPlugin(blink::WebString::fromUTF8("Shockwave Flash"), blink::WebString::fromUTF8("flashPlugin"), blink::WebString::fromUTF8(".swf"));
+//     builder->addMediaTypeToLastPlugin(blink::WebString::fromUTF8("application/x-shockwave-flash"), blink::WebString::fromUTF8("flashPlugin"));
+//     builder->addFileExtensionToLastMediaType(blink::WebString::fromUTF8(".swf"));
+
+    const Vector<PluginPackage*>& plugins = PluginDatabase::installedPlugins()->plugins();
+
+    for (size_t i = 0; i < plugins.size(); ++i) {
+        PluginPackage* package = plugins[i];
+        String name = package->name();
+        String desc = package->description();
+        String file = package->fileName();
+        builder->addPlugin(name, desc, file);
+
+        const MIMEToDescriptionsMap& mimeToDescriptions = package->mimeToDescriptions();
+        MIMEToDescriptionsMap::const_iterator end = mimeToDescriptions.end();
+
+        for (MIMEToDescriptionsMap::const_iterator it = mimeToDescriptions.begin(); it != end; ++it) {
+            String type = it->key;
+            String desc = it->value;
+            builder->addMediaTypeToLastPlugin(type, desc);
+
+            Vector<String> extensions = package->mimeToExtensions().get(type);
+            for (size_t j = 0; j < extensions.size(); ++j) {
+                builder->addFileExtensionToLastMediaType(extensions[j]);
+            }
+        }
+    }
 }
 
 blink::WebFileUtilities* BlinkPlatformImpl::fileUtilities()

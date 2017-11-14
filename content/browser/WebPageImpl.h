@@ -40,6 +40,7 @@ class WebPage;
 class PlatformEventHandler;
 class NavigationController;
 class PopupMenuWin;
+class ToolTip;
 
 class WebPageImpl 
     : public blink::WebViewClient
@@ -80,6 +81,9 @@ public:
     virtual blink::WebStorageNamespace* createSessionStorageNamespace() override;
     virtual blink::WebString acceptLanguages() override;
     virtual blink::WebScreenInfo screenInfo() override;
+
+    virtual void setToolTipText(const blink::WebString&, blink::WebTextDirection hint) override;
+
     // Editing --------------------------------------------------------
     virtual bool handleCurrentKeyboardEvent() override;
 
@@ -95,6 +99,8 @@ public:
     virtual void onLayerTreeSetNeedsCommit() override;
     virtual void disablePaint() override;
     virtual void enablePaint() override;
+
+    void didStartProvisionalLoad();
 
     // PopupMenuWinClient --------------------------------------------------------
     virtual void onPopupMenuCreate(HWND hWnd) override;
@@ -188,7 +194,7 @@ public:
 
     friend class AutoRecordActions;
 
-    //bool m_useLayeredBuffer;
+    ToolTip* m_toolTip;
 
     blink::IntRect m_winodwRect;
 
@@ -242,10 +248,12 @@ public:
     int m_commitCount;
     int m_needsLayout;
     int m_layerDirty;
+    int m_executeMainFrameCount;
     double m_lastFrameTimeMonotonic;
 
     SkCanvas* m_memoryCanvasForUi;
     bool m_disablePaint;
+    int m_firstDrawCount;
 
     blink::Persistent<PopupMenuWin> m_popup;
 };

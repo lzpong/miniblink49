@@ -103,18 +103,13 @@ static CString certificatePath()
 
 static char* g_cookieJarPath = nullptr;
 
-void setCookieJarPath(const WCHAR* path)
+void setCookieJarFullPath(const WCHAR* path)
 {
-    if (!path || !::PathIsDirectoryW(path))
+    if (!path)
         return;
 
-    Vector<WCHAR> jarPath;
-    jarPath.resize(MAX_PATH + 1);
-    wcscpy(jarPath.data(), path);
-    ::PathAppendW(jarPath.data(), L"cookies.dat");
-
     std::vector<char> jarPathA;
-    WTF::WCharToMByte(jarPath.data(), wcslen(jarPath.data()), &jarPathA, CP_ACP);
+    WTF::WCharToMByte(path, wcslen(path), &jarPathA, CP_ACP);
     if (0 == jarPathA.size())
         return;
 
@@ -126,6 +121,19 @@ void setCookieJarPath(const WCHAR* path)
     memset(g_cookieJarPath, 0, pathLen);
 
     strncpy(g_cookieJarPath, &jarPathA[0], jarPathA.size());
+}
+
+void setCookieJarPath(const WCHAR* path)
+{
+    if (!path || !::PathIsDirectoryW(path))
+        return;
+
+    Vector<WCHAR> jarPath;
+    jarPath.resize(MAX_PATH + 1);
+    wcscpy(jarPath.data(), path);
+    ::PathAppendW(jarPath.data(), L"cookies.dat");
+
+    setCookieJarFullPath(jarPath.data());
 }
 
 static char* cookieJarPath()
@@ -266,7 +274,6 @@ inline static bool isAppendableHeader(const String &key)
     return false;
 }
 
-
 WebURLLoaderManager::WebURLLoaderManager()
     : m_cookieJarFileName(cookieJarPath())
     , m_certificatePath(certificatePath())
@@ -384,8 +391,7 @@ void WebURLLoaderManager::didReceiveDataOrDownload(WebURLLoaderInternal* job, co
     job->m_dataLength += dataLength;
 
     if (job->firstRequest()->useStreamOnResponse()) {
-        // We don't support ftp_listening_delegate_ and multipart_delegate_ for
-        // now.
+        // We don't support ftp_listening_delegate_ and multipart_delegate_ for now.
         // TODO(yhirano): Support ftp listening and multipart.
         job->m_bodyStreamWriter->addData(adoptPtr(new FixedReceivedData(data, dataLength, encodedDataLength)));
     }
@@ -461,10 +467,6 @@ void WebURLLoaderManager::handleDidFinishLoading(WebURLLoaderInternal* job, doub
 
 void WebURLLoaderManager::handleDidFail(WebURLLoaderInternal* job, const blink::WebURLError& error)
 {
-#if 0
-    String out = String::format("WebURLLoaderManager::handleDidFail: %s\n", job->firstRequest()->url().string().utf8().data());
-    OutputDebugStringA(out.utf8().data());
-#endif
     if (job->m_bodyStreamWriter) {
         job->m_bodyStreamWriter->fail();
         delete job->m_bodyStreamWriter;
@@ -482,7 +484,7 @@ static void cancelBodyStreaming(int jobId)
     if (!job)
         return;
 
-    if (job->m_bodyStreamWriter) {
+     if (job->m_bodyStreamWriter) {
         job->m_bodyStreamWriter->fail();
         delete job->m_bodyStreamWriter;
         job->m_bodyStreamWriter = nullptr;
@@ -1123,7 +1125,7 @@ void WebURLLoaderManager::removeFromCurlOnIoThread(int jobId)
     if (WebURLLoaderInternal::kNormal == state) {
         m_runningJobs--;
 
-        if (!job->m_isWkeNetSetDataBeSetted) {
+        if (!job->m_isWkeNetSetDataBeSetted && !job->m_isBlackList && !job->m_isDataUrl) {
             ASSERT(job->m_handle);
             WebURLLoaderManagerMainTask* task = WebURLLoaderManagerMainTask::createTask(jobId, WebURLLoaderManagerMainTask::TaskType::kRemoveFromCurl, nullptr, 0, 0, 0);
                         
@@ -1403,6 +1405,8 @@ public:
 
     static void cancel(WebURLLoaderInternal* job)
     {
+        job->m_isBlackList = true;
+        job->m_response.setURL(job->firstRequest()->url());
         job->client()->didReceiveResponse(job->loader(), job->m_response);
         if (job->m_asynWkeNetSetData && !job->m_cancelled) { // 可能在didReceiveResponse里被cancel
             WebURLLoaderManager::sharedInstance()->didReceiveDataOrDownload(job, static_cast<char*>(""), 0, 0);
@@ -1495,13 +1499,9 @@ void WebURLLoaderManager::removeLiveJobs(int jobId)
     m_liveJobs.remove(jobId);
 }
 
-// bool isMessagingTeambitionNet = false;
-// int g_messagingTeambitionNetCount = 0;
-
 bool isBlackListUrl(const String& url)
 {
-    if (false
-        //WTF::kNotFound != url.find("google-analytics.com")
+    if (false//WTF::kNotFound != url.find(".woff")
         //|| WTF::kNotFound != url.find("doubleclick.net")
         // || WTF::kNotFound != url.find("messaging.teambition.net")
         ) {
@@ -1511,21 +1511,39 @@ bool isBlackListUrl(const String& url)
     return false;
 }
 
-static void cancelMessagingTeambitionURL(WebURLLoaderManager* manager, int jobId)
-{
-    WebURLLoaderInternal* job = manager->checkJob(jobId);
-    if (!job || job->m_cancelled)
-        return;
+class HandleDataURLTask : public WebThread::Task {
+public:
+    HandleDataURLTask(WebURLLoaderManager* manager, int jobId)
+    {
+        m_manager = manager;
+        m_jobId = jobId;
+    }
 
-    BlackListCancelTask::cancel(job);
-    manager->cancel(jobId);
-}
+    ~HandleDataURLTask() override
+    {
+    }
+
+    virtual void run() override
+    {
+        WebURLLoaderInternal* job = m_manager->checkJob(m_jobId);
+        if (!job || job->m_cancelled)
+            return;
+
+        KURL url = job->firstRequest()->url();
+        handleDataURL(job->loader(), job->client(), url);
+    }
+
+private:
+    WebURLLoaderManager* m_manager;
+    int m_jobId;
+};
 
 int WebURLLoaderManager::addAsynchronousJob(WebURLLoaderInternal* job)
 {
     ASSERT(WTF::isMainThread());
 
-    String url = job->firstRequest()->url().string();
+    KURL kurl = job->firstRequest()->url();
+    String url = kurl.string();
 #if 0
     String outString = String::format("addAsynchronousJob:%d, %s\n", m_liveJobs.size(), WTF::ensureStringToUTF8(url, true).data());
     OutputDebugStringW(outString.charactersWithNullTermination().data());
@@ -1540,6 +1558,13 @@ int WebURLLoaderManager::addAsynchronousJob(WebURLLoaderInternal* job)
     if (isBlackListUrl(url)) {
         jobId = addLiveJobs(job);
         Platform::current()->currentThread()->postTask(FROM_HERE, new BlackListCancelTask(this, jobId));
+        return jobId;
+    }    
+
+    if (kurl.protocolIsData()) {
+        jobId = addLiveJobs(job);
+        job->m_isDataUrl = true;
+        Platform::current()->currentThread()->postTask(FROM_HERE, new HandleDataURLTask(this, jobId));
         return jobId;
     }
 
@@ -1685,14 +1710,6 @@ static bool dispatchWkeLoadUrlBegin(WebURLLoaderInternal* job)
 
 int WebURLLoaderManager::startJobOnMainThread(WebURLLoaderInternal* job)
 {
-    KURL url = job->firstRequest()->url();
-
-    if (url.protocolIsData()) {
-        handleDataURL(job->loader(), job->client(), url);
-        delete job;
-        return 0;
-    }
-
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     if (dispatchWkeLoadUrlBegin(job))
         return addLiveJobs(job);
@@ -1806,7 +1823,7 @@ WebURLLoaderManager::InitializeHandleInfo* WebURLLoaderManager::preInitializeHan
     }
 
     info->url = WTF::ensureStringToUTF8(urlString, true).data();
-    ASSERT(info->url.size() == urlString.length());
+    //ASSERT(info->url.size() == urlString.length());
 #if 0
     String output = String::format("preInit: %d %s\n", urlString.length(), info->url.c_str());
     OutputDebugStringA(output.utf8().data());
@@ -1916,7 +1933,7 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
 
     KURL url = job->firstRequest()->url();
     String urlString = job->m_url;
-    ASSERT(url.string() == urlString);
+    //ASSERT(url.string() == urlString);
 
     curl_easy_setopt(job->m_handle, CURLOPT_URL, job->m_url);
 
@@ -2048,6 +2065,8 @@ WebURLLoaderInternal::WebURLLoaderInternal(WebURLLoaderImplCurl* loader, const W
     m_response.initialize();
 
     m_dataLength = 0;
+    m_isBlackList = false;
+    m_isDataUrl = false;
 
 #ifndef NDEBUG
     webURLLoaderInternalCounter.increment();
@@ -2079,21 +2098,6 @@ WebURLLoaderInternal::~WebURLLoaderInternal()
     webURLLoaderInternalCounter.decrement();
 #endif
 }
-
-// void WebURLLoaderInternal::ref(int addr)
-// {
-//     m_refs.append(addr);
-// }
-// 
-// void WebURLLoaderInternal::deref(int addr)
-// {
-//     for (size_t i = 0; i < m_refs.size(); ++i) {
-//         if (m_refs[i] == addr) {
-//             m_refs.remove(i);
-//             return;
-//         }
-//     }
-// }
 
 // 初始化HTTP头
 #if 0

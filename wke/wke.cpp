@@ -19,6 +19,7 @@
 namespace net {
 
 void setCookieJarPath(const WCHAR* path);
+void setCookieJarFullPath(const WCHAR* path);
 bool g_cspCheckEnable = true;
 bool g_navigationToNewWindowEnable = true;
 
@@ -27,6 +28,7 @@ bool g_navigationToNewWindowEnable = true;
 //////////////////////////////////////////////////////////////////////////
 static std::string* s_versionString = nullptr;
 static bool wkeIsInit = false;
+bool g_wkeMemoryCacheEnable = true;
 
 bool wkeIsUpdataInOtherThread = false;
 
@@ -132,12 +134,17 @@ void wkeFinalize()
     s_versionString = nullptr;
 }
 
+void wkeSetMemoryCacheEnable(wkeWebView webView, bool b)
+{
+    g_wkeMemoryCacheEnable = b;
+}
+
 void wkeSetNavigationToNewWindowEnable(wkeWebView webView, bool b)
 {
     net::g_navigationToNewWindowEnable = b;
 }
 
-void wkeSeCspCheckEnable(wkeWebView webView, bool b)
+void wkeSetCspCheckEnable(wkeWebView webView, bool b)
 {
     net::g_cspCheckEnable = b;
 }
@@ -479,6 +486,11 @@ void wkeSetCookieJarPath(wkeWebView webView, const WCHAR* path)
     net::setCookieJarPath(path);
 }
 
+void wkeSetCookieJarFullPath(wkeWebView webView, const WCHAR* path)
+{
+    net::setCookieJarFullPath(path);
+}
+
 void wkeSetMediaVolume(wkeWebView webView, float volume)
 {
     webView->setMediaVolume(volume);
@@ -638,6 +650,11 @@ void wkeOnDocumentReady(wkeWebView webView, wkeDocumentReadyCallback callback, v
     webView->onDocumentReady(callback, param);
 }
 
+void wkeOnDocumentReady2(wkeWebView webView, wkeDocumentReady2Callback callback, void* param)
+{
+    webView->onDocumentReady2(callback, param);
+}
+
 void wkeOnLoadingFinish(wkeWebView webView, wkeLoadingFinishCallback callback, void* param)
 {
     webView->onLoadingFinish(callback, param);
@@ -770,14 +787,14 @@ wkeWebView wkeGetWebViewForCurrentContext()
     return webview;
 }
 
-void wkeSetUserKayValue(wkeWebView webView, const char* key, void* value)
+void wkeSetUserKeyValue(wkeWebView webView, const char* key, void* value)
 {
-    webView->setUserKayValue(key, value);
+    webView->setUserKeyValue(key, value);
 }
 
-void* wkeGetUserKayValue(wkeWebView webView, const char* key)
+void* wkeGetUserKeyValue(wkeWebView webView, const char* key)
 {
-    return webView->getUserKayValue(key);
+    return webView->getUserKeyValue(key);
 }
 
 int wkeGetCursorInfoType(wkeWebView webView)
@@ -950,6 +967,11 @@ bool wkeIsLoadFailed(wkeWebView webView)
 bool wkeIsLoadComplete(wkeWebView webView)
 {
     return wkeIsLoadingCompleted(webView);
+}
+
+const utf8* wkeGetSource(wkeWebView webView)
+{
+    return nullptr;
 }
 
 const utf8* wkeTitle(wkeWebView webView)
