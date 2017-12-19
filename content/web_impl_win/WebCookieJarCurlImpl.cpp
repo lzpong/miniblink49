@@ -56,6 +56,21 @@ static bool domainMatch(const String& cookieDomain, const String& host)
     return false;
 }
 
+static const char* equalDelimiters = "__curlequal__";
+
+static void appendDotIfNeeded(String* domain)
+{
+    Vector<char> domainBuffer = WTF::ensureStringToUTF8(*domain, false);
+    int dotCount = 0;
+    for (size_t i = 0; i < domainBuffer.size(); ++i) {
+        if ('.' == domainBuffer[i])
+            ++dotCount;
+    }
+
+    if (1 == dotCount)
+        domain->insert((const LChar *)".", 1, 0);
+}
+
 static void addMatchingCurlCookie(const char* cookie, const String& domain, const String& path, StringBuilder& cookies, bool httponly)
 {
     // Check if the cookie matches domain and path, and is not expired.
@@ -164,9 +179,16 @@ static String getNetscapeCookieFormat(const KURL& url, const String& value)
         Vector<String> nameValuePair;
         attribute->split('=', true, nameValuePair);
         cookieName = nameValuePair[0];
-        cookieValue = nameValuePair[1];
-    }
-    else {
+
+        if (2 < nameValuePair.size()) {
+            for (size_t i = 1; i < nameValuePair.size() - 1; ++i) {
+                cookieName.append('='); // equalDelimiters
+                cookieName.append(nameValuePair[i]);
+            }
+            
+        }
+        cookieValue = nameValuePair.last();
+    } else {
         // According to RFC6265 we should ignore the entire
         // set-cookie string now, but other browsers appear
         // to treat this as <cookiename>=<empty>
@@ -205,6 +227,7 @@ static String getNetscapeCookieFormat(const KURL& url, const String& value)
         }
     }
 
+    appendDotIfNeeded(&domain);
     String allowSubdomains = domain.startsWith('.') ? "TRUE" : "FALSE";
     String expiresStr = String::number(expires);
 
@@ -260,6 +283,27 @@ static void setCookiesFromDOM(const KURL&, const KURL& url, const String& value)
 //     OutputDebugStringA("\n");
 }
 
+const curl_slist* WebCookieJarImpl::getAllCookiesBegin()
+{
+    CURL* curl = curl_easy_init();
+    if (!curl)
+        return nullptr;
+
+    CURLSH* curlsh = net::WebURLLoaderManager::sharedInstance()->getCurlShareHandle();
+
+    curl_easy_setopt(curl, CURLOPT_SHARE, curlsh);
+
+    curl_slist* list = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_COOKIELIST, &list);
+    curl_easy_cleanup(curl);
+    return list;
+}
+
+void WebCookieJarImpl::getAllCookiesEnd(curl_slist* list)
+{
+    curl_slist_free_all(list); 
+}
+
 String WebCookieJarImpl::cookiesForSession(const KURL&, const KURL& url, bool httponly)
 {
     if (!net::WebURLLoaderManager::sharedInstance())
@@ -275,7 +319,7 @@ String WebCookieJarImpl::cookiesForSession(const KURL&, const KURL& url, bool ht
 
     curl_easy_setopt(curl, CURLOPT_SHARE, curlsh);
 
-    struct curl_slist* list = 0;
+    curl_slist* list = nullptr;
     curl_easy_getinfo(curl, CURLINFO_COOKIELIST, &list);
 
     if (list) {

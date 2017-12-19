@@ -123,7 +123,7 @@ WebPluginImpl::WebPluginImpl(WebLocalFrame* parentFrame, const blink::WebPluginP
     , m_invalidateTimer(this, &WebPluginImpl::invalidateTimerFired)
     , m_popPopupsStateTimer(this, &WebPluginImpl::popPopupsStateTimerFired)
     , m_lifeSupportTimer(this, &WebPluginImpl::lifeSupportTimerFired)
-    , m_asynStartTimer(this, &WebPluginImpl::platformStartAsyn)
+    , m_asynStartTask(nullptr)
     , m_setPlatformPluginWidgetVisibilityTimer(this, &WebPluginImpl::asynSetPlatformPluginWidgetVisibilityTimerFired)
     , m_mode(params.loadManually ? NP_FULL : NP_EMBED)
     , m_paramNames(0)
@@ -180,6 +180,9 @@ WebPluginImpl::~WebPluginImpl()
 {
     ASSERT(!m_lifeSupportTimer.isActive());
 
+    if (m_asynStartTask)
+        m_asynStartTask->onParentDestroy();
+
     // If we failed to find the plug-in, we'll return early in our constructor, and
     // m_instance will be 0.
     if (m_instance)
@@ -195,7 +198,7 @@ WebPluginImpl::~WebPluginImpl()
 
     platformDestroy();
 
-    //m_parentFrame->script().cleanupScriptObjectsForPlugin(this);
+    m_pluginContainer->clearScriptObjects();
 
 //     if (m_plugin && !(m_plugin->quirks().contains(PluginQuirkDontUnloadPlugin)))
 //         m_plugin->unload(); // 不卸载了，卸载容易出各种问题
@@ -318,6 +321,51 @@ void WebPluginImpl::mediaCanStart()
 //         parentFrame()->loader().client().dispatchDidFailToStartPlugin(this);
 }
 
+class DestroyNpTask : public blink::WebThread::TaskObserver {
+public:
+    DestroyNpTask(NPP_DestroyProcPtr destroyFunc, NPP instance)
+    {
+        m_destroyFunc = destroyFunc;
+        m_instance = instance;
+    }
+
+    virtual ~DestroyNpTask() override
+    {
+        delete m_instance;
+    }
+
+    virtual void willProcessTask() override
+    {
+    }
+
+    virtual void didProcessTask() override
+    {
+        NPSavedData* savedData = 0;
+        //WebPluginImpl::setCurrentPluginView(this);
+        //SetCallingPlugin(true);
+        NPError npErr = m_destroyFunc(m_instance, &savedData);
+        //setCallingPlugin(false);
+        //WebPluginImpl::setCurrentPluginView(0);
+
+        String out = String::format("DestroyNpTask: %p, m_instance: %p\n", this, m_instance);
+        OutputDebugStringA(out.utf8().data());
+
+        if (savedData) {
+            // TODO: Actually save this data instead of just discarding it
+            if (savedData->buf)
+                NPN_MemFree(savedData->buf);
+            NPN_MemFree(savedData);
+        }
+
+        blink::Platform::current()->currentThread()->removeTaskObserver(this);
+        delete this;
+    }
+
+private:
+    NPP_DestroyProcPtr m_destroyFunc;
+    NPP m_instance;
+};
+
 void WebPluginImpl::stop()
 {
     if (!m_isStarted)
@@ -356,20 +404,11 @@ void WebPluginImpl::stop()
 
     PluginMainThreadScheduler::scheduler().unregisterPlugin(m_instance);
 
-#if 0 // 这里调用destroy会有问题，如果是在_NPN_Evaluate走到这里的话。例子：http://music.yule.sohu.com/20170926/n514522612.shtml
-    NPSavedData* savedData = 0;
-    WebPluginImpl::setCurrentPluginView(this);
-    setCallingPlugin(true);
-    NPError npErr = m_plugin->pluginFuncs()->destroy(m_instance, &savedData);
-    setCallingPlugin(false);
-    WebPluginImpl::setCurrentPluginView(0);
-
-    if (savedData) {
-        // TODO: Actually save this data instead of just discarding it
-        if (savedData->buf)
-            NPN_MemFree(savedData->buf);
-        NPN_MemFree(savedData);
-    }
+#if 1 // 这里调用destroy会有问题，如果是在_NPN_Evaluate走到这里的话。例子：http://music.yule.sohu.com/20170926/n514522612.shtml
+    NPP_t* instance = new NPP_t();
+    instance->ndata = m_instance->ndata;
+    instance->pdata = m_instance->pdata;
+    blink::Platform::current()->currentThread()->addTaskObserver(new DestroyNpTask(m_plugin->pluginFuncs()->destroy, instance));
 #endif
 
     m_instance->pdata = 0;
@@ -1079,6 +1118,11 @@ void WebPluginImpl::keepAlive(NPP instance)
         return;
 
     view->keepAlive();
+}
+
+bool WebPluginImpl::isAlive(NPP instance)
+{
+    return !!instanceMap().get(instance);
 }
 
 NPError WebPluginImpl::getValueStatic(NPNVariable variable, void* value)

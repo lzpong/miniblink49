@@ -33,9 +33,9 @@
 #include "third_party/WebKit/Source/web/WebPluginContainerImpl.h"
 #include "third_party/WebKit/Source/core/frame/FrameView.h"
 #include "third_party/WebKit/Source/platform/graphics/Image.h"
+#include "third_party/WebKit/Source/wtf/Functional.h"
 #include "third_party/WebKit/public/platform/Platform.h"
 #include "third_party/WebKit/public/web/WebInputEvent.h"
-#include "third_party/WebKit/Source/wtf/Functional.h"
 #include "skia/ext/bitmap_platform_device_win.h"
 #include "skia/ext/platform_canvas.h"
 
@@ -985,8 +985,11 @@ void WebPluginImpl::forceRedraw()
 //         ::UpdateWindow(windowHandleForPageClient(parent() ? parent()->hostWindow()->platformPageClient() : 0));
 }
 
-void WebPluginImpl::platformStartAsyn(blink::Timer<WebPluginImpl>*)
+void WebPluginImpl::platformStartAsyn()
 {
+    if (m_asynStartTask)
+        m_asynStartTask = nullptr;
+
     WebPluginContainerImpl* container = (WebPluginContainerImpl*)m_pluginContainer;
     if (!container)
         return;
@@ -1027,15 +1030,31 @@ void WebPluginImpl::platformStartAsyn(blink::Timer<WebPluginImpl>*)
         setNPWindowRect(container->frameRect());
 }
 
+void WebPluginImpl::PlatformStartAsynTask::didProcessTask()
+{
+    //         String out = String::format("didProcessTask, WeakPtr: %p parent:%p\n", m_parentWeakPtr, *m_parentWeakPtr);
+    //         OutputDebugStringA(out.utf8().data());
+
+    if (m_parentPtr)
+        m_parentPtr->platformStartAsyn();
+
+    blink::Platform::current()->currentThread()->removeTaskObserver(this);
+    delete this;
+}
+
 bool WebPluginImpl::platformStart()
 {
     ASSERT(m_isStarted);
     ASSERT(m_status == PluginStatusLoadedSuccessfully);
+    if (m_asynStartTask)
+        return false;
+
     WebPluginContainerImpl* container = (WebPluginContainerImpl*)m_pluginContainer;
     if (!container)
         return false;
 
-    m_asynStartTimer.startOneShot(0, FROM_HERE);
+    m_asynStartTask = new PlatformStartAsynTask(this);
+    blink::Platform::current()->currentThread()->addTaskObserver(m_asynStartTask);
 
     return true;
 }

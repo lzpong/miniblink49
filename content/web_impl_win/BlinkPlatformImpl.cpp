@@ -18,7 +18,7 @@
 #include "content/resources/TextAreaResizeCornerData.h"
 #include "content/resources/LocalizedString.h"
 #include "content/resources/WebKitWebRes.h"
-#include "content/browser/SharedTimerWin.h"
+
 #include "content/browser/WebPage.h"
 #include "cc/blink/WebCompositorSupportImpl.h"
 #include "cc/raster/RasterTaskWorkerThreadPool.h"
@@ -148,7 +148,7 @@ void BlinkPlatformImpl::initialize()
     blink::Platform::initialize(platform);
     gin::IsolateHolder::Initialize(gin::IsolateHolder::kNonStrictMode, gin::ArrayBufferAllocator::SharedInstance());
     blink::initialize(blink::Platform::current());
-    initializeOffScreenTimerWindow();
+    //initializeOffScreenTimerWindow();
 
     // Maximum allocation size allowed for image scaling filters that
     // require pre-scaling. Skia will fallback to a filter that doesn't
@@ -338,6 +338,7 @@ void BlinkPlatformImpl::garbageCollectedTimer(blink::Timer<BlinkPlatformImpl>*)
 
 void BlinkPlatformImpl::doGarbageCollected()
 {
+    blink::memoryCache()->evictResources();
     //net::gActivatingLoaderCheck->doGarbageCollected(false);
     //blink::memoryCache()->evictResources();
     //Heap::collectGarbage(ThreadState::HeapPointersOnStack, ThreadState::GCWithSweep, Heap::ForcedGC);
@@ -345,6 +346,7 @@ void BlinkPlatformImpl::doGarbageCollected()
     //     v8::Isolate::GetCurrent()->IdleNotificationDeadline(currentMonotonicallyTime + 0.1);
     //     v8::Isolate::GetCurrent()->ContextDisposedNotification(false);
     SkGraphics::PurgeResourceCache();
+    SkGraphics::PurgeFontCache();
 
 //     String out = String::format("BlinkPlatformImpl::doGarbageCollected: %d %d %d\n", g_v8MemSize, g_blinkMemSize, g_skiaMemSize);
 //     OutputDebugStringA(out.utf8().data());
@@ -588,10 +590,11 @@ blink::WebScrollbarBehavior* BlinkPlatformImpl::scrollbarBehavior()
 blink::WebURLError BlinkPlatformImpl::cancelledError(const blink::WebURL& url) const
 {
     blink::WebURLError error;
-    error.reason = -1;
+    error.reason = -3; // net::ERR_ABORTED
     error.domain = blink::WebString(url.string());
     error.localizedDescription = blink::WebString::fromUTF8("url cancelledError\n");
-
+    error.isCancellation = true;
+    error.staleCopyInCache = false;
     WTF::String outError = "url cancelledError:";
     outError.append((WTF::String)url.string());
     outError.append("\n");
@@ -604,14 +607,14 @@ blink::WebStorageNamespace* BlinkPlatformImpl::createLocalStorageNamespace()
 {
     if (!m_localStorageStorageMap)
         m_localStorageStorageMap = new DOMStorageMapWrap();
-    return new blink::WebStorageNamespaceImpl(blink::kLocalStorageNamespaceId, m_localStorageStorageMap->map);
+    return new blink::WebStorageNamespaceImpl(blink::kLocalStorageNamespaceId, &m_localStorageStorageMap->map, true);
 }
 
 blink::WebStorageNamespace* BlinkPlatformImpl::createSessionStorageNamespace()
 {
     if (!m_sessionStorageStorageMap)
         m_sessionStorageStorageMap = new DOMStorageMapWrap();
-    return new blink::WebStorageNamespaceImpl(m_storageNamespaceIdCount++, m_sessionStorageStorageMap->map);
+    return new blink::WebStorageNamespaceImpl(m_storageNamespaceIdCount++, &m_sessionStorageStorageMap->map, false);
 }
 
 bool BlinkPlatformImpl::portAllowed(const blink::WebURL&) const

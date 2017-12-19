@@ -420,7 +420,7 @@ bool getCookiesFromHost(const KURL& url, Vector<char>* cookies) {
 #endif
 	int32 cookie_action = COOKIEACTION_READ;
 #undef COOKIEACTION_READ
-
+	// TODO string utf8 -> UTF16
 	BOOL result = InternetGetCookieA(url.string().utf8().data(), NULL, NULL, &cookie_size);
 	DWORD error = 0;
 	if (!result || 0 == cookie_size) {
@@ -535,19 +535,12 @@ bool WebURLLoaderWinINet::start(const blink::WebURLRequest& request, blink::WebU
     m_client = client;
 
     blink::KURL url = (blink::KURL)request.url();
-    Vector<UChar> host = WTF::ensureUTF16UChar(url.host(), false);
+    Vector<UChar> host = WTF::ensureUTF16UChar(url.host(), true);
 
     if (!url.isValid() || !url.protocolIsData()) {
         WTF::String outstr = String::format("WebURLLoaderWinINet.loadAsynchronously: %p %ws\n", this, WTF::ensureUTF16UChar(url.string(), true).data());
         OutputDebugStringW(outstr.charactersWithNullTermination().data());
     }
-
-    //////////////////////////////////////////////////////////////////////////
-//  if (WTF::kNotFound != url.string().find("Window.js")) {
-//         m_debugRedirectPath = new blink::KURL(ParsedURLString, "file:///C:/Users/Administrator/Desktop/test/wangbayingxiao/window.js");
-//         OutputDebugStringW(L"");
-// 	}
-    //////////////////////////////////////////////////////////////////////////
 
     if (url.isLocalFile() || url.protocolIsData()) {
         if (m_loadSynchronously) {
@@ -626,7 +619,7 @@ bool WebURLLoaderWinINet::start(const blink::WebURLRequest& request, blink::WebU
     }
 
     HeaderFlattenerForWinINet flattener;
-	flattener.m_url = url;
+    flattener.m_url = url;
     flattener.m_debugTest = WTF::kNotFound != url.string().find("http://m.mi.com/v1/product/view");
     flattener.m_requestHandle = m_requestHandle;
     request.visitHTTPHeaderFields(&flattener);

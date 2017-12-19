@@ -5,6 +5,7 @@
 
 #include "content/browser/WebPage.h"
 #include "content/web_impl_win/BlinkPlatformImpl.h"
+#include "content/web_impl_win/WebCookieJarCurlImpl.h"
 #include "net/WebURLLoaderManager.h"
 
 //cexer: 必须包含在后面，因为其中的 wke.h -> windows.h 会定义 max、min，导致 WebCore 内部的 max、min 出现错乱。
@@ -31,6 +32,8 @@ static bool wkeIsInit = false;
 bool g_wkeMemoryCacheEnable = true;
 
 bool wkeIsUpdataInOtherThread = false;
+
+unsigned int g_mbRuntimeEnabledFeatures = 0;
 
 void wkeInitialize()
 {
@@ -469,6 +472,43 @@ const wchar_t * wkeGetCookieW(wkeWebView webView)
 const utf8* wkeGetCookie(wkeWebView webView)
 {
     return webView->cookie();
+}
+
+const wkeCookieList* wkeGetAllCookie()
+{
+    return (const wkeCookieList*)content::WebCookieJarImpl::getAllCookiesBegin();
+}
+
+void wkeFreeCookieList(const wkeCookieList* cookieList)
+{
+    content::WebCookieJarImpl::getAllCookiesEnd((curl_slist*)cookieList);
+}
+
+void wkePerformCookieCommand(wkeCookieCommand command)
+{
+    CURL* curl = curl_easy_init();
+
+    if (!curl)
+        return;
+
+    CURLSH* curlsh = net::WebURLLoaderManager::sharedInstance()->getCurlShareHandle();
+    curl_easy_setopt(curl, CURLOPT_SHARE, curlsh);
+
+    switch (command) {
+    case wkeCookieCommandClearAllCookies:
+        curl_easy_setopt(curl, CURLOPT_COOKIELIST, "ALL");
+        break;
+    case wkeCookieCommandClearSessionCookies:
+        curl_easy_setopt(curl, CURLOPT_COOKIELIST, "SESS");
+        break;
+    case wkeCookieCommandFlushCookiesToFile:
+        curl_easy_setopt(curl, CURLOPT_COOKIELIST, "FLUSH");
+        break;
+    case wkeCookieCommandReloadCookiesFromFile :
+        curl_easy_setopt(curl, CURLOPT_COOKIELIST, "RELOAD");
+        break;
+    }
+    curl_easy_cleanup(curl);
 }
 
 void wkeSetCookieEnabled(wkeWebView webView, bool enable)
@@ -932,6 +972,12 @@ const utf8* wkeVersionString()
     return wkeGetVersionString();
 }
 
+void wkeGC(wkeWebView webView, long delayMs)
+{
+    content::BlinkPlatformImpl* platformImpl = (content::BlinkPlatformImpl*)blink::Platform::current();
+    platformImpl->startGarbageCollectedThread((double)delayMs);
+}
+
 extern "C" void curl_set_file_system(
     WKE_FILE_OPEN pfnOpen,
     WKE_FILE_CLOSE pfnClose,
@@ -940,8 +986,13 @@ extern "C" void curl_set_file_system(
     WKE_FILE_SEEK pfnSeek,
     WKE_EXISTS_FILE pfnExistsFile);
 
+WKE_FILE_OPEN g_pfnOpen = nullptr;
+WKE_FILE_CLOSE g_pfnClose = nullptr;
+
 void wkeSetFileSystem(WKE_FILE_OPEN pfnOpen, WKE_FILE_CLOSE pfnClose, WKE_FILE_SIZE pfnSize, WKE_FILE_READ pfnRead, WKE_FILE_SEEK pfnSeek)
 {
+    WKE_FILE_OPEN g_pfnOpen = pfnOpen;
+    WKE_FILE_CLOSE g_pfnClose = pfnClose;
     curl_set_file_system(pfnOpen, pfnClose, pfnSize, pfnRead, pfnSeek, nullptr);
 }
 
