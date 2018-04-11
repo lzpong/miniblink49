@@ -23,6 +23,9 @@ struct CWebViewHandler {
     wkeTitleChangedCallback titleChangedCallback;
     void* titleChangedCallbackParam;
 
+    wkeTitleChangedCallback mouseOverUrlChangedCallback;
+    void* mouseOverUrlChangedCallbackParam;
+
     wkeURLChangedCallback urlChangedCallback;
     void* urlChangedCallbackParam;
 
@@ -59,6 +62,9 @@ struct CWebViewHandler {
     wkeDownloadCallback downloadCallback;
     void* downloadCallbackParam;
 
+    wkeNetResponseCallback netResponseCallback;
+    void* netResponseCallbackParam;
+
     wkeConsoleCallback consoleCallback;
     void* consoleCallbackParam;
 
@@ -77,11 +83,16 @@ struct CWebViewHandler {
     wkeWillReleaseScriptContextCallback willReleaseScriptContextCallback;
     void* willReleaseScriptContextCallbackParam;
 
-    wkeWindowClosingCallback m_windowClosingCallback;
-    void* m_windowClosingCallbackParam;
+    wkeWindowClosingCallback windowClosingCallback;
+    void* windowClosingCallbackParam;
     
-    wkeWindowDestroyCallback m_windowDestroyCallback;
-    void* m_windowDestroyCallbackParam;
+    wkeWindowDestroyCallback windowDestroyCallback;
+    void* windowDestroyCallbackParam;
+
+    wkeDraggableRegionsChangedCallback draggableRegionsChangedCallback;
+    void* draggableRegionsChangedCallbackParam;
+
+    
 
     bool isWke;//是否是使用的wke接口
 };
@@ -153,6 +164,7 @@ public:
     HWND windowHandle() const;
     void setHandle(HWND wnd);
     void setHandleOffset(int x, int y);
+    void setViewSettings(const wkeViewSettings*);
     bool canGoBack() const override;
     bool goBack() override;
     bool canGoForward() const override;
@@ -188,10 +200,14 @@ public:
     virtual void killFocus() override;
     
     virtual wkeRect getCaret() override;
-    wkeRect caretRect() ;
-    
+    wkeRect caretRect();
+
+    static int64_t wkeWebFrameHandleToFrameId(content::WebPage* page, wkeWebFrameHandle frameId);
+    static wkeWebFrameHandle frameIdTowkeWebFrameHandle(content::WebPage* page, int64_t frameId);
+
     jsValue runJS(const wchar_t* script) override;
     jsValue runJS(const utf8* script) override;
+    jsValue runJsInFrame(wkeWebFrameHandle frameId, const utf8* script, bool isInClosure);
     jsExecState globalExec() override;
     
     void sleep() override;
@@ -207,7 +223,9 @@ public:
     
     void onURLChanged(wkeURLChangedCallback callback, void* callbackParam);
     void onURLChanged2(wkeURLChangedCallback2 callback, void* callbackParam);
+    void onUrlChanged(const wkeString url);
     void onTitleChanged(wkeTitleChangedCallback callback, void* callbackParam);
+    void onMouseOverUrlChanged(wkeTitleChangedCallback callback, void* callbackParam);
     virtual void onPaintUpdated(wkePaintUpdatedCallback callback, void* callbackParam);
 
     void onAlertBox(wkeAlertBoxCallback callback, void* callbackParam);
@@ -223,12 +241,15 @@ public:
     virtual void onDownload(wkeDownloadCallback callback, void* callbackParam);
     virtual void onConsole(wkeConsoleCallback callback, void* callbackParam);
     virtual void onCallUiThread(wkeCallUiThread callback, void* callbackParam);
+    void onNetResponse(wkeNetResponseCallback callback, void* callbackParam);
     
     void onLoadUrlBegin(wkeLoadUrlBeginCallback callback, void* callbackParam);
     void onLoadUrlEnd(wkeLoadUrlEndCallback callback, void* callbackParam);
 
     void onDidCreateScriptContext(wkeDidCreateScriptContextCallback callback, void* callbackParam);
     void onWillReleaseScriptContext(wkeWillReleaseScriptContextCallback callback, void* callbackParam);
+
+    void onDraggableRegionsChanged(wkeDraggableRegionsChangedCallback callback, void* param);
 
     void setClientHandler(const wkeClientHandler* handler) override;
     const wkeClientHandler* getClientHandler() const override;
@@ -251,7 +272,11 @@ public:
     String getProxy() const { return m_proxy; }
     net::WebURLLoaderManager::ProxyType getProxyType() const { return m_proxyType; }
 
+    void showDevTools(const utf8* url);
+
 protected:
+    friend class ShowDevToolsTaskObserver;
+
     HWND m_hWnd;
     void _initHandler();
     void _initPage();
@@ -287,6 +312,8 @@ protected:
 
     content::WebPage* m_webPage;
 
+    float m_zoomFactor;
+
     OwnPtr<HDC> m_hdc;
     OwnPtr<HBITMAP> m_hbitmap;
     //void* m_pixels;
@@ -297,6 +324,12 @@ protected:
 
     String m_proxy;
     net::WebURLLoaderManager::ProxyType m_proxyType;
+
+    friend class ShowDevToolsTaskObserver;
+    bool m_isCreatedDevTools;
+    wkeWebView m_devToolsWebView;
+
+    wkeViewSettings m_settings;
 };
 
 };//namespace wke

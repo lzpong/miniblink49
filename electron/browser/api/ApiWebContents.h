@@ -35,6 +35,47 @@ public:
         unsigned styleEx;
         bool transparent;
         std::wstring title;
+        bool isShow;
+        bool isCenter;
+        bool isResizable;
+        bool isMinimizable;
+        bool isMaximizable;
+        bool isFrame;
+
+        bool isUseContentSize;
+        bool isAlwaysOnTop;
+        bool isClosable;
+
+        int minWidth;
+        int minHeight;
+        int maxWidth;
+        int maxHeight;
+
+        CreateWindowParam() {
+            x = 0;
+            y = 0;
+            width = 0;
+            height = 0;
+            styles = 0;
+            styleEx = 0;
+            transparent = false;
+
+            isShow = true;
+            isCenter = false;
+            isResizable = true;
+            isMinimizable = true;
+            isMaximizable = true;
+            isFrame = true;
+
+            isUseContentSize = false;
+            isAlwaysOnTop = false;
+            isClosable = true;
+
+            minWidth = 100;
+            minHeight = 100;
+            maxWidth = 500;
+            maxHeight = 500;
+        }
     };
 
     static void init(v8::Isolate* isolate, v8::Local<v8::Object> target, node::Environment* env);
@@ -209,12 +250,17 @@ public:
     static v8::Persistent<v8::Function> constructor;
     static gin::WrapperInfo kWrapperInfo;
 
+
 private:
+    friend class Window;
+
     NodeBindings* m_nodeBinding;
     int m_id;
     std::set<WebContentsObserver*> m_observers;
     wkeWebView m_view;
     WindowInterface* m_owner;
+
+    bool m_isNodeIntegration;
 };
 
 } // atom

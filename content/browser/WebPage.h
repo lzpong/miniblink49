@@ -62,6 +62,15 @@ public:
 
     void close();
 
+    static void gcAll();
+    void gc();
+
+    void onDocumentReady();
+
+    static void connetDevTools(WebPage* frontEnd, WebPage* embedder);
+    bool isDevtoolsConneted() const;
+    void inspectElementAt(int x, int y);
+
     void loadURL(int64 frameId, const wchar_t* url, const blink::Referrer& referrer, const wchar_t* extraHeaders);
     void loadRequest(int64 frameId, const blink::WebURLRequest& request);
     void loadHTMLString(int64 frameId, const blink::WebData& html, const blink::WebURL& baseURL, const blink::WebURL& unreachableURL = blink::WebURL(), bool replace = false);
@@ -109,7 +118,8 @@ public:
     void goBack();
     bool canGoForward();
     void goForward();
-    void didCommitProvisionalLoad(blink::WebLocalFrame* frame, const blink::WebHistoryItem& history, blink::WebHistoryCommitType type);
+    void didCommitProvisionalLoad(blink::WebLocalFrame* frame,
+        const blink::WebHistoryItem& history, blink::WebHistoryCommitType type, bool isSameDocument);
 
     void setTransparent(bool transparent);
 
@@ -118,6 +128,9 @@ public:
 
     void disablePaint();
     void enablePaint();
+
+    void willEnterDebugLoop();
+    void didExitDebugLoop();
 
     void didStartProvisionalLoad();
 
@@ -133,7 +146,9 @@ public:
 
     WebFrameClientImpl* webFrameClientImpl();
 
-    blink::WebFrame* getWebFrameFromFrameId(int64 frameId);
+    blink::WebFrame* getWebFrameFromFrameId(int64_t frameId);
+    int64_t getFrameIdByBlinkFrame(const blink::WebFrame* frame);
+    static int64_t getFirstFrameId();
 
     // kMainFrameId must be -1 to align with renderer expectations.
     static const int64 kMainFrameId = -1;

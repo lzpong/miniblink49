@@ -22,6 +22,7 @@ class WebMimeRegistryImpl;
 class WebClipboardImpl;
 class WebFileUtilitiesImpl;
 class WebBlobRegistryImpl;
+class WebCryptoImpl;
 
 class BlinkPlatformImpl : NON_EXPORTED_BASE(public blink::Platform) {
 public:
@@ -66,8 +67,17 @@ public:
 
     virtual blink::WebCompositorSupport* compositorSupport() override;
 
+    // Process -------------------------------------------------------------
+
+    // Returns a unique identifier for a process. This may not necessarily be
+    // the process's process ID.
+    virtual uint32_t getUniqueIdForProcess() override;
+
     // Scrollbar ----------------------------------------------------------
     virtual blink::WebScrollbarBehavior* scrollbarBehavior() override;
+
+    // Message Ports -------------------------------------------------------
+    virtual void createMessageChannel(blink::WebMessagePortChannel** channel1, blink::WebMessagePortChannel** channel2) override;
 
     // Network -------------------------------------------------------------
     blink::WebURLLoader* createURLLoader() override;
@@ -101,6 +111,10 @@ public:
     // fileUtilities -------------------------------------------------------
     virtual blink::WebFileUtilities* fileUtilities() override;
 
+    // WebCrypto ----------------------------------------------------------
+
+    virtual blink::WebCrypto* crypto() override;
+
     //////////////////////////////////////////////////////////////////////////
     virtual void registerMemoryDumpProvider(blink::WebMemoryDumpProvider*) override;
     virtual void unregisterMemoryDumpProvider(blink::WebMemoryDumpProvider*) override;
@@ -114,6 +128,7 @@ private:
     void destroyWebInfo();
     void closeThread();
     void garbageCollectedTimer(blink::Timer<BlinkPlatformImpl>*);
+    void perfTimer(blink::Timer<BlinkPlatformImpl>*);
 
     CRITICAL_SECTION* m_lock;
     static const int m_maxThreadNum = 1000;
@@ -121,6 +136,7 @@ private:
     int m_threadNum;
 
     blink::Timer<BlinkPlatformImpl>* m_gcTimer;
+    blink::Timer<BlinkPlatformImpl>* m_perfTimer;
 
     blink::WebThread* m_ioThread;
 
@@ -130,6 +146,7 @@ private:
     WebClipboardImpl* m_clipboardImpl;
     WebBlobRegistryImpl* m_blobRegistryImpl;
     WebFileUtilitiesImpl* m_webFileUtilitiesImpl;
+    WebCryptoImpl* m_webCryptoImpl;
     cc_blink::WebCompositorSupportImpl* m_webCompositorSupport;
     blink::WebScrollbarBehavior* m_webScrollbarBehavior;
     DOMStorageMapWrap* m_localStorageStorageMap;

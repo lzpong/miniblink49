@@ -6,6 +6,7 @@
 #include "content/browser/WebPage.h"
 #include "content/web_impl_win/BlinkPlatformImpl.h"
 #include "content/web_impl_win/WebCookieJarCurlImpl.h"
+#include "content/web_impl_win/WebThreadImpl.h"
 #include "net/WebURLLoaderManager.h"
 
 //cexer: 必须包含在后面，因为其中的 wke.h -> windows.h 会定义 max、min，导致 WebCore 内部的 max、min 出现错乱。
@@ -14,26 +15,23 @@
 #include "wkeWebWindow.h"
 #include "third_party/WebKit/public/web/WebKit.h"
 #include "third_party/WebKit/public/web/WebFrame.h"
+#include "third_party/WebKit/public/web/WebDragOperation.h"
+#include "third_party/WebKit/public/platform/WebDragData.h"
+#include "third_party/WebKit/Source/web/WebViewImpl.h"
+#include "gen/blink/platform/RuntimeEnabledFeatures.h"
 #include <v8.h>
 #include "wtf/text/WTFString.h"
 
 namespace net {
-
 void setCookieJarPath(const WCHAR* path);
 void setCookieJarFullPath(const WCHAR* path);
-bool g_cspCheckEnable = true;
-bool g_navigationToNewWindowEnable = true;
-
 }
+
+bool g_isSetDragEnable = true;
 
 //////////////////////////////////////////////////////////////////////////
 static std::string* s_versionString = nullptr;
 static bool wkeIsInit = false;
-bool g_wkeMemoryCacheEnable = true;
-
-bool wkeIsUpdataInOtherThread = false;
-
-unsigned int g_mbRuntimeEnabledFeatures = 0;
 
 void wkeInitialize()
 {
@@ -105,10 +103,12 @@ void wkeSetViewNetInterface(wkeWebView webView, const char* netInterface)
 
 void wkeConfigure(const wkeSettings* settings)
 {
+    if (!settings)
+        return;
     if (settings->mask & WKE_SETTING_PROXY)
         wkeSetProxy(&settings->proxy);
     if (settings->mask & WKE_SETTING_PAINTCALLBACK_IN_OTHER_THREAD)
-        wkeIsUpdataInOtherThread = true;
+        blink::RuntimeEnabledFeatures::setUpdataInOtherThreadEnabled(true);
 }
 
 void wkeInitializeEx(const wkeSettings* settings)
@@ -139,22 +139,62 @@ void wkeFinalize()
 
 void wkeSetMemoryCacheEnable(wkeWebView webView, bool b)
 {
-    g_wkeMemoryCacheEnable = b;
+    blink::RuntimeEnabledFeatures::setMemoryCacheEnabled(b);
+}
+
+bool g_isTouchEnabled = false;
+
+void wkeSetTouchEnabled(wkeWebView webView, bool b)
+{
+    blink::RuntimeEnabledFeatures::setTouchEnabled(b);
+    //g_isTouchEnabled = b;
 }
 
 void wkeSetNavigationToNewWindowEnable(wkeWebView webView, bool b)
 {
-    net::g_navigationToNewWindowEnable = b;
+    blink::RuntimeEnabledFeatures::setNavigationToNewWindowEnabled(b);
 }
 
 void wkeSetCspCheckEnable(wkeWebView webView, bool b)
 {
-    net::g_cspCheckEnable = b;
+    blink::RuntimeEnabledFeatures::setCspCheckEnabled(b);
 }
 
-void wkeSetDebugConfig(wkeWebView webView, const char* debugString)
+void wkeSetNpapiPluginsEnabled(wkeWebView webView, bool b)
 {
+    blink::RuntimeEnabledFeatures::setNpapiPluginsEnabled(b);
+}
 
+void wkeSetHeadlessEnabled(wkeWebView webView, bool b)
+{
+    blink::RuntimeEnabledFeatures::setHeadlessEnabled(b);
+}
+
+void wkeSetDragEnable(wkeWebView webView, bool b)
+{
+    g_isSetDragEnable = b;
+}
+
+void wkeSetDebugConfig(wkeWebView webView, const char* debugString, const char* param)
+{
+    String stringDebug(debugString);
+
+    Vector<String> result;
+    stringDebug.split(",", result);
+    for (size_t i = 0; i < result.size(); ++i) {
+        String item = result[i];
+        if ("alwaysIsNotSolideColor" == item) {
+            blink::RuntimeEnabledFeatures::setAlwaysIsNotSolideColorEnabled(true);
+        } else if ("drawDirtyDebugLine" == item) {
+            blink::RuntimeEnabledFeatures::setDrawDirtyDebugLineEnabled(true);
+        } else if ("drawTileLine" == item) {
+            blink::RuntimeEnabledFeatures::setDrawTileLineEnabled(true);
+        } else if ("alwaysInflateDirtyRect" == item) {
+
+        } else if ("showDevTools" == item) {
+            webView->showDevTools(param);
+        }
+    }
 }
 
 void wkeUpdate()
@@ -217,6 +257,11 @@ void wkeSetHandle(wkeWebView webView, HWND wnd)
 void wkeSetHandleOffset(wkeWebView webView, int x, int y)
 {
     webView->setHandleOffset(x, y);
+}
+
+void wkeSetViewSettings(wkeWebView webView, const wkeViewSettings* settings)
+{
+    webView->setViewSettings(settings);
 }
 
 bool wkeIsTransparent(wkeWebView webView)
@@ -381,7 +426,7 @@ void wkeLayoutIfNeeded(wkeWebView webView)
 
 void wkePaint2(wkeWebView webView, void* bits, int bufWid, int bufHei, int xDst, int yDst, int w, int h, int xSrc, int ySrc, bool bCopyAlpha)
 {
-    webView->paint(bits, bufWid, bufHei, xDst, yDst, w, h, xSrc, ySrc,bCopyAlpha);
+    webView->paint(bits, bufWid, bufHei, xDst, yDst, w, h, xSrc, ySrc, bCopyAlpha);
 }
 
 void wkePaint(wkeWebView webView, void* bits, int pitch)
@@ -391,7 +436,8 @@ void wkePaint(wkeWebView webView, void* bits, int pitch)
 
 void wkeRepaintIfNeeded(wkeWebView webView)
 {
-    webView->repaintIfNeeded();
+    if (webView)
+        webView->repaintIfNeeded();
 }
 
 HDC wkeGetViewDC(wkeWebView webView)
@@ -401,7 +447,7 @@ HDC wkeGetViewDC(wkeWebView webView)
 
 HWND wkeGetHostHWND(wkeWebView webView)
 {
-	return webView->windowHandle();
+    return webView->windowHandle();
 }
 
 bool wkeCanGoBack(wkeWebView webView)
@@ -474,14 +520,17 @@ const utf8* wkeGetCookie(wkeWebView webView)
     return webView->cookie();
 }
 
-const wkeCookieList* wkeGetAllCookie()
+void wkeSetCookie(wkeWebView webView, const utf8* url, const utf8* cookie)
 {
-    return (const wkeCookieList*)content::WebCookieJarImpl::getAllCookiesBegin();
+    blink::KURL webUrl(blink::ParsedURLString, url);
+    blink::KURL webFirstPartyForCookies;
+    String webCookie(cookie);
+    content::WebCookieJarImpl::inst()->setCookie(webUrl, webFirstPartyForCookies, webCookie);
 }
 
-void wkeFreeCookieList(const wkeCookieList* cookieList)
+void wkeVisitAllCookie(void* params, wkeCookieVisitor visitor)
 {
-    content::WebCookieJarImpl::getAllCookiesEnd((curl_slist*)cookieList);
+    content::WebCookieJarImpl::visitAllCookie(params, (content::WebCookieJarImpl::CookieVisitor)visitor);
 }
 
 void wkePerformCookieCommand(wkeCookieCommand command)
@@ -529,6 +578,26 @@ void wkeSetCookieJarPath(wkeWebView webView, const WCHAR* path)
 void wkeSetCookieJarFullPath(wkeWebView webView, const WCHAR* path)
 {
     net::setCookieJarFullPath(path);
+}
+
+String* kLocalStorageFullPath = nullptr;
+
+void wkeSetLocalStorageFullPath(wkeWebView webView, const WCHAR* path)
+{
+    if (!path)
+        return;
+
+    if (kLocalStorageFullPath)
+        delete kLocalStorageFullPath;
+    kLocalStorageFullPath = new String(path);
+    if (kLocalStorageFullPath->isEmpty()) {
+        delete kLocalStorageFullPath;
+        kLocalStorageFullPath = nullptr;
+        return;
+    }
+
+    if (!kLocalStorageFullPath->endsWith(L'\\'))
+        kLocalStorageFullPath->append(L'\\');
 }
 
 void wkeSetMediaVolume(wkeWebView webView, float volume)
@@ -617,7 +686,23 @@ void wkeSleep(wkeWebView webView)
 
 void wkeWake(wkeWebView webView)
 {
-    webView->wake();
+    if (webView)
+        webView->wake();
+
+    static DWORD lastTime = 0;
+
+    DWORD time = ::GetTickCount();
+
+//     String output = String::format("wkeWake: %d\n", time - lastTime);
+//     OutputDebugStringA(output.utf8().data());
+    if (time - lastTime < 300)
+        return;
+
+    lastTime = time;
+
+    content::WebThreadImpl* threadImpl = (content::WebThreadImpl*)(blink::Platform::current()->currentThread());
+    threadImpl->fire();
+
 }
 
 bool wkeIsAwake(wkeWebView webView)
@@ -644,6 +729,12 @@ void wkeOnTitleChanged(wkeWebView webView, wkeTitleChangedCallback callback, voi
 {
     webView->onTitleChanged(callback, callbackParam);
 }
+
+void wkeOnMouseOverUrlChanged(wkeWebView webView, wkeTitleChangedCallback callback, void* callbackParam)
+{
+    webView->onMouseOverUrlChanged(callback, callbackParam);
+}
+
 
 void wkeOnURLChanged(wkeWebView webView, wkeURLChangedCallback callback, void* callbackParam)
 {
@@ -702,7 +793,12 @@ void wkeOnLoadingFinish(wkeWebView webView, wkeLoadingFinishCallback callback, v
 
 void wkeOnDownload(wkeWebView webView, wkeDownloadCallback callback, void* param)
 {
-	webView->onDownload(callback, param);
+    webView->onDownload(callback, param);
+}
+
+void wkeNetOnResponse(wkeWebView webView, wkeNetResponseCallback callback, void* param)
+{
+    webView->onNetResponse(callback, param);
 }
 
 void wkeOnConsole(wkeWebView webView, wkeConsoleCallback callback, void* param)
@@ -717,12 +813,12 @@ void wkeSetUIThreadCallback(wkeWebView webView, wkeCallUiThread callback, void* 
 
 void wkeOnLoadUrlBegin(wkeWebView webView, wkeLoadUrlBeginCallback callback, void* callbackParam)
 {
-	webView->onLoadUrlBegin(callback, callbackParam);
+    webView->onLoadUrlBegin(callback, callbackParam);
 }
 
 void wkeOnLoadUrlEnd(wkeWebView webView, wkeLoadUrlEndCallback callback, void* callbackParam)
 {
-	webView->onLoadUrlEnd(callback, callbackParam);
+    webView->onLoadUrlEnd(callback, callbackParam);
 }
 
 void wkeOnDidCreateScriptContext(wkeWebView webView, wkeDidCreateScriptContextCallback callback, void* callbackParam)
@@ -735,27 +831,72 @@ void wkeOnWillReleaseScriptContext(wkeWebView webView, wkeWillReleaseScriptConte
     webView->onWillReleaseScriptContext(callback, callbackParam);
 }
 
-bool wkeWebFrameIsMainFrame(wkeWebFrameHandle webFrame)
+wkeWillMediaLoadCallback g_wkeWillMediaLoadCallback = nullptr;
+void* g_wkeWillMediaLoadCallbackCallbackParam = nullptr;
+void wkeOnWillMediaLoad(wkeWebView webView, wkeWillMediaLoadCallback callback, void* callbackParam)
 {
-    blink::WebFrame* frame = (blink::WebFrame*)webFrame;
-    return !frame->parent();
+    g_wkeWillMediaLoadCallback = callback;
+    g_wkeWillMediaLoadCallbackCallbackParam = callbackParam;
 }
 
-bool wkeIsWebRemoteFrame(wkeWebFrameHandle webFrame)
+bool wkeIsMainFrame(wkeWebView webView, wkeWebFrameHandle frameId)
 {
-    blink::WebFrame* frame = (blink::WebFrame*)webFrame;
-    return frame->isWebRemoteFrame();
+    content::WebPage* page = webView->webPage();
+    if (!page)
+        return false;
+    blink::WebFrame* webFrame = page->getWebFrameFromFrameId(wke::CWebView::wkeWebFrameHandleToFrameId(page, frameId));
+    if (!webFrame)
+        return false;
+    return !webFrame->parent();
+}
+
+bool wkeIsWebRemoteFrame(wkeWebView webView, wkeWebFrameHandle frameId)
+{
+    content::WebPage* page = webView->webPage();
+    if (!page)
+        return false;
+    blink::WebFrame* webFrame = page->getWebFrameFromFrameId(wke::CWebView::wkeWebFrameHandleToFrameId(page, frameId));
+    if (!webFrame)
+        return false;
+    return webFrame->isWebRemoteFrame();
 }
 
 wkeWebFrameHandle wkeWebFrameGetMainFrame(wkeWebView webView)
 {
-    return webView->webPage()->mainFrame();
+    content::WebPage* page = webView->webPage();
+    if (!page)
+        return nullptr;
+    blink::WebFrame* frame = page->mainFrame();
+    if (!frame)
+        return nullptr;
+    return wke::CWebView::frameIdTowkeWebFrameHandle(page, page->getFrameIdByBlinkFrame(frame));
 }
 
-void wkeWebFrameGetMainWorldScriptContext(wkeWebFrameHandle wkeFrame, v8ContextPtr contextOut)
+jsValue wkeRunJsByFrame(wkeWebView webView, wkeWebFrameHandle frameId, const utf8* script, bool isInClosure)
 {
-    blink::WebFrame* frame = (blink::WebFrame*)wkeFrame;
-    v8::Local<v8::Context> result = frame->mainWorldScriptContext();
+    return webView->runJsInFrame(frameId, script, isInClosure);
+}
+
+const utf8* wkeGetFrameUrl(wkeWebView webView, wkeWebFrameHandle frameId)
+{
+    content::WebPage* page = webView->webPage();
+    if (!page)
+        return "";
+    blink::WebFrame* webFrame = page->getWebFrameFromFrameId(wke::CWebView::wkeWebFrameHandleToFrameId(page, frameId));
+    if (!webFrame)
+        return "";
+    return "";
+}
+
+void wkeWebFrameGetMainWorldScriptContext(wkeWebView webView, wkeWebFrameHandle frameId, v8ContextPtr contextOut)
+{
+    content::WebPage* page = webView->webPage();
+    if (!page)
+        return;
+    blink::WebFrame* webFrame = page->getWebFrameFromFrameId(wke::CWebView::wkeWebFrameHandleToFrameId(page, frameId));
+    if (!webFrame)
+        return;
+    v8::Local<v8::Context> result = webFrame->mainWorldScriptContext();
     v8::Local<v8::Context>* contextOutPtr = (v8::Local<v8::Context>*)contextOut;
     *contextOutPtr = result;
 }
@@ -807,13 +948,13 @@ void wkeSetStringW(wkeString string, const wchar_t* str, size_t len)
     string->setString(str, len);
 }
 
-WKE_API wkeString wkeCreateStringW(const wchar_t* str, size_t len)
+wkeString wkeCreateStringW(const wchar_t* str, size_t len)
 {
     wkeString wkeStr = new wke::CString(str, len);
     return wkeStr;
 }
 
-WKE_API void wkeDeleteString(wkeString str)
+void wkeDeleteString(wkeString str)
 {
     delete str;
 }
@@ -907,6 +1048,12 @@ void wkeOnWindowDestroy(wkeWebView webWindow, wkeWindowDestroyCallback callback,
         return window->onDestroy(callback, param);
 }
 
+void wkeOnDraggableRegionsChanged(wkeWebView webWindow, wkeDraggableRegionsChangedCallback callback, void* param)
+{
+    if (wke::CWebView* window = static_cast<wke::CWebView*>(webWindow))
+        return window->onDraggableRegionsChanged(callback, param);
+}
+
 void wkeShowWindow(wkeWebView webWindow, bool showFlag)
 {
     if (wke::CWebWindow* window = static_cast<wke::CWebWindow*>(webWindow))
@@ -947,6 +1094,89 @@ void wkeSetWindowTitleW(wkeWebView webWindow, const wchar_t* title)
 {
     if (wke::CWebWindow* window = static_cast<wke::CWebWindow*>(webWindow))
         return window->setTitle(title);
+}
+
+static void convertDragData(blink::WebDragData* data, const wkeWebDragData* webDragData) {
+    data->initialize();
+
+    if (webDragData->m_filesystemId)
+        data->setFilesystemId(webDragData->m_filesystemId->original());
+    for (int i = 0; i < webDragData->m_itemListLength; ++i) {
+        wkeWebDragData::Item* it = &webDragData->m_itemList[i];
+        blink::WebDragData::Item item;
+        item.storageType = (blink::WebDragData::Item::StorageType)it->storageType;
+        if (it->stringType)
+            item.stringType = it->stringType->original();
+        if (it->stringData)
+            item.stringData = it->stringData->original();
+        if (it->filenameData)
+            item.filenameData = it->filenameData->original();
+        if (it->displayNameData)
+            item.displayNameData = it->displayNameData->original();
+        if (it->binaryData)
+            item.binaryData.assign(it->binaryData, it->binaryDataLength);
+        if (it->title)
+            item.title = it->title->original();
+        if (it->fileSystemURL)
+            item.fileSystemURL = blink::KURL(blink::ParsedURLString, it->fileSystemURL->original());
+        item.fileSystemFileSize = it->fileSystemFileSize;
+        if (it->baseURL)
+            item.baseURL = blink::KURL(blink::ParsedURLString, it->baseURL->original());
+
+        data->addItem(item);
+    }
+}
+
+wkeWebDragOperation wkeDragTargetDragEnter(wkeWebView webWindow, const wkeWebDragData* webDragData, const POINT* clientPoint, const POINT* screenPoint, wkeWebDragOperationsMask operationsAllowed, int modifiers)
+{
+    if (!webWindow->webPage())
+        return wkeWebDragOperationNone;
+    blink::WebViewImpl* view = webWindow->webPage()->webViewImpl();
+    if (!view)
+        return wkeWebDragOperationNone;
+
+    blink::WebDragData data;
+    convertDragData(&data, webDragData);
+    blink::WebDragOperation op = view->dragTargetDragEnter(data,
+        blink::WebPoint(clientPoint->x, clientPoint->y),
+        blink::WebPoint(screenPoint->x, screenPoint->y),
+        (blink::WebDragOperationsMask)operationsAllowed, modifiers);
+
+    return (wkeWebDragOperation)op;
+}
+
+wkeWebDragOperation wkeDragTargetDragOver(wkeWebView webWindow, const POINT* clientPoint, const POINT* screenPoint, wkeWebDragOperationsMask operationsAllowed, int modifiers)
+{
+    if (!webWindow->webPage())
+        return wkeWebDragOperationNone;
+    blink::WebViewImpl* view = webWindow->webPage()->webViewImpl();
+    if (!view)
+        return wkeWebDragOperationNone;
+
+    blink::WebDragOperation op = view->dragTargetDragOver(blink::WebPoint(clientPoint->x, clientPoint->y),
+        blink::WebPoint(screenPoint->x, screenPoint->y), (blink::WebDragOperationsMask)operationsAllowed, modifiers);
+    return (wkeWebDragOperation)op;
+}
+
+void wkeDragTargetDragLeave(wkeWebView webWindow)
+{
+    if (!webWindow->webPage())
+        return;
+    blink::WebViewImpl* view = webWindow->webPage()->webViewImpl();
+    if (view)
+        view->dragTargetDragLeave();
+}
+
+void wkeDragTargetDrop(wkeWebView webWindow, const POINT* clientPoint, const POINT* screenPoint, int modifiers)
+{
+    if (!webWindow->webPage())
+        return;
+    blink::WebViewImpl* view = webWindow->webPage()->webViewImpl();
+    if (!view)
+        return;
+
+    view->dragTargetDrop(blink::WebPoint(clientPoint->x, clientPoint->y),
+        blink::WebPoint(screenPoint->x, screenPoint->y), modifiers);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1177,16 +1407,6 @@ const utf8* wkeToString(const wkeString string)
 const wchar_t* wkeToStringW(const wkeString string)
 {
     return wkeGetStringW(string);
-}
-
-const utf8* jsToString(jsExecState es, jsValue v)
-{
-    return jsToTempString(es, v);
-}
-
-const wchar_t* jsToStringW(jsExecState es, jsValue v)
-{
-    return jsToTempStringW(es, v);
 }
 
 // V1 API end

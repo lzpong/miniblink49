@@ -56,6 +56,8 @@ public:
     void setLayerTreeHost(cc::LayerTreeHost* host);
     cc::LayerTreeHost* layerTreeHost() const;
 
+    void gc();
+
     // WebLayerImplClient
     virtual void updataAndPaintContents(blink::WebCanvas* canvas, const blink::IntRect& clip) override;
     virtual WebLayerImplClient::Type type() const override { return m_layerType; }
@@ -112,6 +114,7 @@ public:
     bool shouldFlattenTransform();
     void setRenderingContext(int context) override;
     void setUseParentBackfaceVisibility(bool visible) override;
+    void setDoubleSided(bool isDoubleSided);
     void setBackgroundColor(blink::WebColor color) override;
     blink::WebColor backgroundColor() const override;
     void setFilters(const blink::WebFilterOperations& filters) override;
@@ -230,6 +233,7 @@ protected:
     int context;
     int  m_3dSortingContextId;
     bool m_useParentBackfaceVisibility;
+    bool m_isDoubleSided;
     blink::WebColor m_backgroundColor;
     blink::WebDoublePoint m_scrollPositionDouble;
     blink::WebDoublePoint m_scrollCompensationAdjustment;
@@ -242,8 +246,8 @@ protected:
     blink::IntRect m_touchEventHandlerRegions;
     blink::WebScrollBlocksOn m_scrollBlocksOn;
     bool m_isContainerForFixedPositionLayers;
-    cc_blink::WebLayerImpl* m_scrollParent;
-    cc_blink::WebLayerImpl* m_clipParent;
+    //cc_blink::WebLayerImpl* m_scrollParent;
+    //cc_blink::WebLayerImpl* m_clipParent;
     cc_blink::WebLayerImpl* m_maskLayer;
     cc_blink::WebLayerImpl* m_replicaLayer;
     WTF::HashSet<WebLayerImpl*>* m_scrollChildren;

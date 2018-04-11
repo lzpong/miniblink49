@@ -65,6 +65,7 @@ namespace net {
     
 class WebURLLoaderManagerMainTask;
 class WebURLLoaderManager;
+class FlattenHTTPBodyElementStream;
 
 class WebURLLoaderInternal {
 public:
@@ -80,10 +81,16 @@ public:
     int m_id;
     bool m_isSynchronous;
 
+    blink::WebURLRequest* m_firstRequest;
+
     WebURLLoaderClient* client() { return m_client; }
     WebURLLoaderClient* m_client;
 
-    void setResponseFired(bool responseFired) { m_responseFired = responseFired; };
+    void setResponseFired(bool responseFired)
+    {
+        m_responseFired = responseFired;
+    }
+
     bool responseFired() { return m_responseFired; }
 
     WebURLLoaderImplCurl* loader() { return m_loader; }
@@ -113,9 +120,9 @@ public:
     OwnPtr<MultipartHandle> m_multipartHandle;
     bool m_cancelled;
 
-    //FormDataStream m_formDataStream;
-    WTF::Vector<char> m_postBytes;
-    size_t m_postBytesReadOffset;
+    FlattenHTTPBodyElementStream* m_formDataStream;
+//     WTF::Vector<FlattenHTTPBodyElement*> m_postBytes;
+//     size_t m_postBytesReadOffset;
 
     enum FailureType {
         NoFailure,
@@ -127,11 +134,10 @@ public:
     bool m_responseFired;
 
     WebURLLoaderImplCurl* m_loader;
-    blink::WebURLRequest* m_firstRequest;
     WebURLLoaderManager* m_manager;
 
     WTF::Mutex m_destroingMutex;
-    enum  State {
+    enum State {
         kNormal,
         kDestroying,
         kDestroyed,

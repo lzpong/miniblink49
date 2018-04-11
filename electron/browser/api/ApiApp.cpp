@@ -9,6 +9,9 @@
 #include "base/values.h"
 #include "wke.h"
 #include "nodeblink.h"
+#include "base/strings/string_util.h"
+#include "base/files/file_path.h"
+#include <shlobj.h>
 
 namespace atom {
 
@@ -72,20 +75,30 @@ void App::nullFunction() {
     OutputDebugStringA("nullFunction\n");
 }
 
+void quit() {
+    ::TerminateProcess(::GetCurrentProcess(), 0);
+    WindowList::closeAllWindows();
+
+    ThreadCall::exitMessageLoop(ThreadCall::getBlinkThreadId());
+    ThreadCall::exitMessageLoop(ThreadCall::getUiThreadId());
+}
+
 void App::quitApi() {
     OutputDebugStringA("quitApi\n");
+    quit();
+
+    if (ThreadCall::isUiThread()) {
+        quit();
+        return;
+    }
 
     ThreadCall::callUiThreadAsync([] {
-        WindowList::closeAllWindows();
-
-        ThreadCall::exitMessageLoop(ThreadCall::getBlinkThreadId());
-        ThreadCall::exitMessageLoop(ThreadCall::getUiThreadId());
+        quit();
     });
 }
 
 void App::exitApi() {
-    ::TerminateProcess(::GetCurrentProcess(), 0);
-    OutputDebugStringA("exitApi\n");
+    quitApi();
 }
 
 void App::focusApi() {
@@ -163,7 +176,7 @@ bool App::setUserTasksApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 void App::setDesktopNameApi(const std::string& desktopName) { 
-    OutputDebugStringA("setDesktopNameApi\n");
+    OutputDebugStringA("App::setDesktopNameApi\n");
 }
 
 v8::Local<v8::Value> App::getJumpListSettingsApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -200,6 +213,79 @@ void App::relaunchApi(const base::DictionaryValue& options) {
     OutputDebugStringA("relaunchApi\n");
 }
 
+void App::setPathApi(const std::string& name, const std::string& path) { 
+    if (name == "userData" || name == "cache" || name == "userCache" || name == "documents"
+        || name == "downloads" || name == "music" || name == "videos" || name == "pepperFlashSystemPlugin") {
+        m_pathMap.insert(std::make_pair(name, path));
+    }
+}
+
+bool getTempDir(base::FilePath* path) {
+    wchar_t temp_path[MAX_PATH + 1];
+    DWORD path_len = ::GetTempPath(MAX_PATH, temp_path);
+    if (path_len >= MAX_PATH || path_len <= 0)
+        return false;
+    // TODO(evanm): the old behavior of this function was to always strip the
+    // trailing slash.  We duplicate this here, but it shouldn't be necessary
+    // when everyone is using the appropriate FilePath APIs.
+    *path = base::FilePath(temp_path).StripTrailingSeparators();
+    return true;
+}
+
+base::FilePath getHomeDir() {
+    wchar_t result[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_PROFILE, NULL, SHGFP_TYPE_CURRENT, result)) && result[0])
+        return base::FilePath(result);
+
+    // Fall back to the temporary directory on failure.
+    base::FilePath temp;
+    if (getTempDir(&temp))
+        return temp;
+
+    // Last resort.
+    return base::FilePath(L"C:\\");
+}
+
+std::string App::getPathApi(const std::string& name) const {
+    base::FilePath path;
+    std::wstring systemBuffer;
+    systemBuffer.assign(MAX_PATH, L'\0');
+    std::wstring pathBuffer;
+    if (name == "appData") {
+        if ((::SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, &systemBuffer[0])) < 0)
+            return "";
+    } else if (name == "userData" || name == "documents"
+        || name == "downloads" || name == "music" || name == "videos" || name == "pepperFlashSystemPlugin") {
+        std::map<std::string, std::string>::const_iterator it = m_pathMap.find(name);
+        if (it == m_pathMap.end())
+            return "";
+        return it->second;
+    } else if (name == "home")
+        systemBuffer = getHomeDir().value();
+    else if (name == "temp") {
+        if (!getTempDir(&path))
+            return "";
+            systemBuffer = path.value();
+    } else if (name == "userDesktop" || name == "desktop") {
+        if (FAILED(SHGetFolderPath(NULL, CSIDL_DESKTOPDIRECTORY, NULL, SHGFP_TYPE_CURRENT, &systemBuffer[0])))
+            return "";
+    } else if (name == "exe") {
+        ::GetModuleFileName(NULL, &systemBuffer[0], MAX_PATH);
+    } else if (name == "module")
+        ::GetModuleFileName(NULL, &systemBuffer[0], MAX_PATH);
+    else if (name == "cache" || name == "userCache") {
+        if ((::SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, &systemBuffer[0])) < 0)
+            return "";
+       
+        pathBuffer = systemBuffer.c_str();
+        pathBuffer += L"\\electron";
+    } else
+        return "";
+
+    pathBuffer = systemBuffer.c_str();
+    return base::WideToUTF8(pathBuffer);
+}
+
 void App::newFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
     v8::Isolate* isolate = args.GetIsolate();
     if (args.IsConstructCall()) {
@@ -210,6 +296,11 @@ void App::newFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 void App::onWindowAllClosed() {
+    if (ThreadCall::isUiThread()) {
+        emit("window-all-closed");
+        return;
+    }
+
     App* self = this;
     ThreadCall::callUiThreadAsync([self] {
         self->emit("window-all-closed");
@@ -229,4 +320,4 @@ static NodeNative nativeBrowserAppNative{ "App", BrowserAppNative, sizeof(Browse
 
 NODE_MODULE_CONTEXT_AWARE_BUILTIN_SCRIPT_MANUAL(atom_browser_app, initializeAppApi, &nativeBrowserAppNative)
 
-}
+} 

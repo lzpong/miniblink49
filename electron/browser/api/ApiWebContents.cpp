@@ -9,6 +9,7 @@
 #include "common/IdLiveDetect.h"
 #include "common/NodeBinding.h"
 #include "common/api/EventEmitterCaller.h"
+#include "common/StringUtil.h"
 #include "gin/dictionary.h"
 #include "gin/object_template_builder.h"
 #include "base/values.h"
@@ -118,7 +119,7 @@ WebContents* WebContents::create(v8::Isolate* isolate, gin::Dictionary options, 
 }
 
 WebContents::WebContents(v8::Isolate* isolate, v8::Local<v8::Object> wrapper) {
-    
+    m_isNodeIntegration = true;
     m_nodeBinding = nullptr;
     m_id = IdLiveDetect::get()->constructed();
     m_view = nullptr;
@@ -192,7 +193,7 @@ void WebContents::staticDidCreateScriptContextCallback(wkeWebView webView, wkeWe
 }
 
 void WebContents::onDidCreateScriptContext(wkeWebView webView, wkeWebFrameHandle frame, v8::Local<v8::Context>* context, int extensionGroup, int worldId) {
-    if (m_nodeBinding || !wkeWebFrameIsMainFrame(frame))
+    if (m_nodeBinding || !wkeIsMainFrame(webView, frame) || !m_isNodeIntegration)
         return;
 
     BlinkMicrotaskSuppressionHandle handle = nodeBlinkMicrotaskSuppressionEnter((*context)->GetIsolate());
@@ -271,15 +272,15 @@ static std::vector<v8::Local<v8::Value>> listValueToVector(v8::Isolate* isolate,
     return result;
 }
 
-static void emitIPCEvent(wkeWebFrameHandle frame, const std::string& channel, const base::ListValue& args) {
-    if (!frame || wkeIsWebRemoteFrame(frame))
+static void emitIPCEvent(wkeWebView view, wkeWebFrameHandle frame, const std::string& channel, const base::ListValue& args) {
+    if (!frame || wkeIsWebRemoteFrame(view, frame))
         return;
 
     v8::Isolate* isolate = (v8::Isolate*)wkeGetBlinkMainThreadIsolate();
     v8::HandleScope handleScope(isolate);
 
     v8::Local<v8::Context> context;
-    wkeWebFrameGetMainWorldScriptContext(frame, &context);
+    wkeWebFrameGetMainWorldScriptContext(view, frame, &context);
     v8::Context::Scope contextScope(context);
 
     // Only emit IPC event for context with node integration.
@@ -307,7 +308,7 @@ void WebContents::anyPostMessageToRenderer(const std::string& channel, const bas
 
     ThreadCall::callBlinkThreadAsync([self, id, channelWrap, listParamsWrap] {
         if (IdLiveDetect::get()->isLive(id)) {
-            emitIPCEvent(wkeWebFrameGetMainFrame(self->m_view), *channelWrap, *listParamsWrap);
+            emitIPCEvent(self->m_view, wkeWebFrameGetMainFrame(self->m_view), *channelWrap, *listParamsWrap);
         }
 
         delete channelWrap;
@@ -327,12 +328,45 @@ bool WebContents::equalApi() const {
     return false;
 }
 
+static std::string* trimUrl(const std::string& url) {
+    std::string* str = new std::string(url);
+    if (str->size() > 9 && str->substr(0, 7) == "file://") {
+        if (str->at(7) != '/')
+            str->insert(7, 1, '/');
+
+        for (size_t i = 0; i < str->size(); ++i) { // 如果是中文路径，则把问号前面的内容解码
+            char c = str->at(i);
+            if ('?' != c)
+                continue;
+
+            std::string urldecodeHead = StringUtil::urlDecode(str->c_str(), i + 1);
+            urldecodeHead += str->substr(i, str->size() - i);
+            *str = urldecodeHead;
+            break;
+        }
+    }
+
+    char invalideHead[] = "http:\\";
+    int invalideHeadLength = sizeof(invalideHead) - 1;
+    if (str->size() > invalideHeadLength && str->substr(0, invalideHeadLength) == invalideHead) {
+        for (size_t i = 0; i < str->size(); ++i) { // 反斜杠替换成斜杠
+            char c = str->at(i);
+            if ('\\' != c)
+                continue;
+            str->at(i) = '/';
+        }
+        char c = str->at(invalideHeadLength);
+        if (c != '/')
+            str->insert(str->begin() + invalideHeadLength, 1, '/');
+    }
+
+    return str;
+}
+
 void WebContents::_loadURLApi(const std::string& url) {
     WebContents* self = this;
-    std::string* str = new std::string(url);
-    if (str->size() > 9 && str->substr(0, 7) == "file://" && str->at(7) != '/')
-        str->insert(7, 1, '/');
-
+    std::string* str = trimUrl(url);
+    
     int id = m_id;
     ThreadCall::callBlinkThreadAsync([self, str, id] {
         if (IdLiveDetect::get()->isLive(id))

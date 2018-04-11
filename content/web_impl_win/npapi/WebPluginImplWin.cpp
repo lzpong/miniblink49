@@ -798,7 +798,16 @@ void WebPluginImpl::paint(blink::WebCanvas* canvas, const blink::WebRect& rect)
         return;
     }
 
-    HDC hMemoryDC = skia::BeginPlatformPaint(m_memoryCanvas);
+    SkPaint clearPaint;
+    clearPaint.setARGB(0xff, 0xFF, 0xFF, 0xFF);
+    clearPaint.setXfermodeMode(SkXfermode::kClear_Mode);
+
+    SkRect skrc;
+    blink::IntRect r = container->frameRect();
+    skrc.set(0, 0, r.width(), r.height());
+    m_memoryCanvas->drawRect(skrc, clearPaint);
+
+    HDC hMemoryDC = skia::BeginPlatformPaint(m_parentWidget, m_memoryCanvas);
 
     // On Safari/Windows without transparency layers the GraphicsContext returns the HDC
     // of the window and the plugin expects that the passed in DC has window coordinates.
@@ -816,7 +825,8 @@ void WebPluginImpl::paint(blink::WebCanvas* canvas, const blink::WebRect& rect)
     SkBaseDevice* bitmapDevice = skia::GetTopDevice(*m_memoryCanvas);
     const SkBitmap& bitmap = bitmapDevice->accessBitmap(false);
     
-    canvas->drawBitmap(bitmap, m_windowRect.x(), m_windowRect.y());
+    if (canvas != m_memoryCanvas)
+        canvas->drawBitmap(bitmap, m_windowRect.x(), m_windowRect.y());
 }
 
 void WebPluginImpl::setNPWindowRect(const IntRect& rect)
@@ -1026,8 +1036,10 @@ void WebPluginImpl::platformStartAsyn()
     
     updatePluginWidget(m_windowRect, m_clipRect);
 
-    if (!m_plugin->quirks().contains(PluginQuirkDeferFirstSetWindowCall))
-        setNPWindowRect(container->frameRect());
+    if (!m_plugin->quirks().contains(PluginQuirkDeferFirstSetWindowCall)) {
+        IntRect r = container->frameRect();
+        paint(m_memoryCanvas, r);
+    }
 }
 
 void WebPluginImpl::PlatformStartAsynTask::didProcessTask()

@@ -324,13 +324,16 @@ void WebThreadImpl::deleteUnusedTimers()
 {
     for (size_t i = 0; i < m_unusedTimersToDelete.size(); ++i) {
         WebTimerBase* timer = m_unusedTimersToDelete[i];
-        if (1 == timer->refCount()) { // weolar
+
+#if 0
+        if (1 == timer->refCount()) {
             for (size_t j = 0; j < m_timerHeap.size(); ++j) {
                 WebTimerBase* timerOther = m_timerHeap[j];
                 if (timerOther == timer)
                     DebugBreak();
             }
         }
+#endif
         timer->deref();
     }
     m_unusedTimersToDelete.clear();
@@ -397,7 +400,7 @@ void WebThreadImpl::fireOnExit()
 void WebThreadImpl::schedulerTasks()
 {
     // Do a re-entrancy check.
-    if (m_firingTimers || m_suspendTimerQueue) 
+    if (m_firingTimers /*|| m_suspendTimerQueue*/) 
         return;
     m_firingTimers = true;
 

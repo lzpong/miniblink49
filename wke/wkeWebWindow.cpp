@@ -3,6 +3,9 @@
 
 #include "wkeWebWindow.h"
 
+extern DWORD g_paintCount;
+extern bool g_isSetDragEnable;
+
 ////////////////////////////////////////////////////////////////////////////
 
 namespace wke {
@@ -190,8 +193,8 @@ LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_CLOSE:
-        if (getWkeHandler()->m_windowClosingCallback) {
-            if (!getWkeHandler()->m_windowClosingCallback(this, getWkeHandler()->m_windowClosingCallbackParam))
+        if (getWkeHandler()->windowClosingCallback) {
+            if (!getWkeHandler()->windowClosingCallback(this, getWkeHandler()->windowClosingCallbackParam))
                 return 0;
         }
 
@@ -241,7 +244,7 @@ LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         break;
 
     case WM_ERASEBKGND:
-        return TRUE;
+        return 0;
 
     case WM_SIZE: {
         RECT rc = { 0 };
@@ -254,26 +257,27 @@ LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 
         return 0;
     }
-    case WM_DROPFILES: {
-        Vector<wchar_t> szFile;
-        szFile.resize(2 * MAX_PATH);
-        memset(szFile.data(), 0, sizeof(wchar_t) * 2 * (MAX_PATH));
+    case WM_DROPFILES:
+        if (g_isSetDragEnable) {
+            Vector<wchar_t> szFile;
+            szFile.resize(2 * MAX_PATH);
+            memset(szFile.data(), 0, sizeof(wchar_t) * 2 * (MAX_PATH));
         
-        wcscpy(szFile.data(), L"file:///");
+            wcscpy(szFile.data(), L"file:///");
 
-        HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+            HDROP hDrop = reinterpret_cast<HDROP>(wParam);
 
-        UINT uFilesCount = ::DragQueryFileW(hDrop, 0xFFFFFFFF, szFile.data(), MAX_PATH);
-        if (uFilesCount != 0) {
-            UINT uRet = ::DragQueryFileW(hDrop, 0, (wchar_t*)szFile.data() + 8, MAX_PATH);
-            if (uRet != 0) {
-                wkeLoadURLW(this, szFile.data());
-                ::SetWindowTextW(hwnd, szFile.data());
+            UINT uFilesCount = ::DragQueryFileW(hDrop, 0xFFFFFFFF, szFile.data(), MAX_PATH);
+            if (uFilesCount != 0) {
+                UINT uRet = ::DragQueryFileW(hDrop, 0, (wchar_t*)szFile.data() + 8, MAX_PATH);
+                if (uRet != 0) {
+                    wkeLoadURLW(this, szFile.data());
+                    ::SetWindowTextW(hwnd, szFile.data());
+                }
             }
+            ::DragFinish(hDrop);
         }
-        ::DragFinish(hDrop);
         return 0;
-    }
     //case WM_NCHITTEST:
     //    if (IsWindow(m_hWnd) && flagsOff(GetWindowLong(m_hWnd, GWL_STYLE), WS_CAPTION))
     //    {
@@ -549,50 +553,50 @@ void CWebWindow::_staticOnPaintUpdated(wkeWebView webView, void* param, const HD
 
 void CWebWindow::_onPaintUpdated(const HDC hdc, int x, int y, int cx, int cy)
 {
-    BOOL callOk = FALSE;
-    if (WS_EX_LAYERED == (WS_EX_LAYERED & GetWindowLong(m_hWnd, GWL_EXSTYLE))) {
-        RECT rectDest;
-        ::GetWindowRect(m_hWnd, &rectDest);
-
-        SIZE sizeDest = { rectDest.right - rectDest.left, rectDest.bottom - rectDest.top };
-        POINT pointDest = { 0, 0 }; // { rectDest.left, rectDest.top };
-        POINT pointSource = { 0, 0 };
-
-        BITMAP bmp = { 0 };
-        HBITMAP hBmp = (HBITMAP)::GetCurrentObject(hdc, OBJ_BITMAP);
-        ::GetObject(hBmp, sizeof(BITMAP), (LPSTR)&bmp);
-
-        sizeDest.cx = bmp.bmWidth;
-        sizeDest.cy = bmp.bmHeight;
-
-        HDC hdcScreen = GetDC(m_hWnd);
-
-        BLENDFUNCTION blend = { 0 };
-        blend.BlendOp = AC_SRC_OVER;
-        blend.SourceConstantAlpha = 255;
-        blend.AlphaFormat = AC_SRC_ALPHA;
-        callOk = ::UpdateLayeredWindow(m_hWnd, hdcScreen, nullptr, &sizeDest, hdc, &pointSource, RGB(0xFF, 0xFF, 0xFF), &blend, ULW_ALPHA);
-        if (!callOk) {
-            HDC hdcMemory = ::CreateCompatibleDC(hdcScreen);
-            HBITMAP hbmpMemory = ::CreateCompatibleBitmap(hdcScreen, sizeDest.cx, sizeDest.cy);
-            HBITMAP hbmpOld = (HBITMAP)::SelectObject(hdcMemory, hbmpMemory);
-
-            ::BitBlt(hdcMemory, 0, 0, sizeDest.cx, sizeDest.cy, hdc, 0, 0, SRCCOPY | CAPTUREBLT);
-
-            ::BitBlt(hdc, 0, 0, sizeDest.cx, sizeDest.cy, hdcMemory, 0, 0, SRCCOPY | CAPTUREBLT); //!
-
-            callOk = ::UpdateLayeredWindow(m_hWnd, hdcScreen, nullptr, &sizeDest, hdcMemory, &pointSource, RGB(0xFF, 0xFF, 0xFF), &blend, ULW_ALPHA);
-
-            ::SelectObject(hdcMemory, (HGDIOBJ)hbmpOld);
-            ::DeleteObject((HGDIOBJ)hbmpMemory);
-            ::DeleteDC(hdcMemory);
-        }
-
-        ::ReleaseDC(m_hWnd, hdcScreen);
-    } else {
-        RECT rc = {x, y, x + cx, y + cy};
-        callOk = ::InvalidateRect(m_hWnd, &rc, TRUE);
-    }
+//     BOOL callOk = FALSE;
+//     if (WS_EX_LAYERED == (WS_EX_LAYERED & GetWindowLong(m_hWnd, GWL_EXSTYLE))) {
+//         RECT rectDest;
+//         ::GetWindowRect(m_hWnd, &rectDest);
+// 
+//         SIZE sizeDest = { rectDest.right - rectDest.left, rectDest.bottom - rectDest.top };
+//         POINT pointDest = { 0, 0 }; // { rectDest.left, rectDest.top };
+//         POINT pointSource = { 0, 0 };
+// 
+//         BITMAP bmp = { 0 };
+//         HBITMAP hBmp = (HBITMAP)::GetCurrentObject(hdc, OBJ_BITMAP);
+//         ::GetObject(hBmp, sizeof(BITMAP), (LPSTR)&bmp);
+// 
+//         sizeDest.cx = bmp.bmWidth;
+//         sizeDest.cy = bmp.bmHeight;
+// 
+//         HDC hdcScreen = GetDC(m_hWnd);
+// 
+//         BLENDFUNCTION blend = { 0 };
+//         blend.BlendOp = AC_SRC_OVER;
+//         blend.SourceConstantAlpha = 255;
+//         blend.AlphaFormat = AC_SRC_ALPHA;
+//         callOk = ::UpdateLayeredWindow(m_hWnd, hdcScreen, nullptr, &sizeDest, hdc, &pointSource, RGB(0xFF, 0xFF, 0xFF), &blend, ULW_ALPHA);
+//         if (!callOk) {
+//             HDC hdcMemory = ::CreateCompatibleDC(hdcScreen);
+//             HBITMAP hbmpMemory = ::CreateCompatibleBitmap(hdcScreen, sizeDest.cx, sizeDest.cy);
+//             HBITMAP hbmpOld = (HBITMAP)::SelectObject(hdcMemory, hbmpMemory);
+// 
+//             ::BitBlt(hdcMemory, 0, 0, sizeDest.cx, sizeDest.cy, hdc, 0, 0, SRCCOPY | CAPTUREBLT);
+// 
+//             ::BitBlt(hdc, 0, 0, sizeDest.cx, sizeDest.cy, hdcMemory, 0, 0, SRCCOPY | CAPTUREBLT); //!
+// 
+//             callOk = ::UpdateLayeredWindow(m_hWnd, hdcScreen, nullptr, &sizeDest, hdcMemory, &pointSource, RGB(0xFF, 0xFF, 0xFF), &blend, ULW_ALPHA);
+// 
+//             ::SelectObject(hdcMemory, (HGDIOBJ)hbmpOld);
+//             ::DeleteObject((HGDIOBJ)hbmpMemory);
+//             ::DeleteDC(hdcMemory);
+//         }
+// 
+//         ::ReleaseDC(m_hWnd, hdcScreen);
+//     } else {
+//         RECT rc = {x, y, x + cx, y + cy};
+//         callOk = ::InvalidateRect(m_hWnd, &rc, TRUE);
+//     }
 
     if (m_originalPaintUpdatedCallback)
         m_originalPaintUpdatedCallback(this, m_originalPaintUpdatedCallbackParam, hdc, x, y, cx, cy);
@@ -624,18 +628,14 @@ void CWebWindow::_onDocumentReady()
 
 void CWebWindow::onClosing(wkeWindowClosingCallback callback, void* param)
 {
-//     m_windowClosingCallback = callback;
-//     m_windowClosingCallbackParam = param;
-    getWkeHandler()->m_windowClosingCallback = callback;
-    getWkeHandler()->m_windowClosingCallbackParam = param;
+    getWkeHandler()->windowClosingCallback = callback;
+    getWkeHandler()->windowClosingCallbackParam = param;
 }
 
 void CWebWindow::onDestroy(wkeWindowDestroyCallback callback, void* param)
 {
-//     m_windowDestroyCallback = callback;
-//     m_windowDestroyCallbackParam = param;
-    getWkeHandler()->m_windowDestroyCallback = callback;
-    getWkeHandler()->m_windowDestroyCallbackParam = param;
+    getWkeHandler()->windowDestroyCallback = callback;
+    getWkeHandler()->windowDestroyCallbackParam = param;
 }
 
 void CWebWindow::show(bool b)
@@ -655,6 +655,9 @@ void CWebWindow::move(int x, int y, int width, int height)
 
 void CWebWindow::resize(int width, int height)
 {
+    if (0 >= width || 0 >= height)
+        return;
+
     POINT point = { 0 };
     
     RECT rect = { 0 };

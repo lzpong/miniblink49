@@ -12,7 +12,7 @@
 #include "cc/trees/LayerTreeHostClient.h"
 #include "skia/ext/platform_canvas.h"
 
-#include "content/browser/PopupMenuWinClient.h"
+#include "content/ui/PopupMenuWinClient.h"
 
 namespace cc {
 class LayerTreeHost;
@@ -41,6 +41,9 @@ class PlatformEventHandler;
 class NavigationController;
 class PopupMenuWin;
 class ToolTip;
+class DevToolsClient;
+class DevToolsAgent;
+class DragHandle;
 
 class WebPageImpl 
     : public blink::WebViewClient
@@ -69,6 +72,11 @@ public:
 
     void init(WebPage* pagePtr, HWND hWnd);
     void close();
+
+    void gc();
+
+    DevToolsAgent* createOrGetDevToolsAgent();
+    DevToolsClient* createOrGetDevToolsClient();
     
     // WebViewClient
     virtual void didInvalidateRect(const blink::WebRect&) override;
@@ -81,11 +89,16 @@ public:
     virtual blink::WebStorageNamespace* createSessionStorageNamespace() override;
     virtual blink::WebString acceptLanguages() override;
     virtual blink::WebScreenInfo screenInfo() override;
-
+    virtual void setMouseOverURL(const blink::WebURL&) override;
     virtual void setToolTipText(const blink::WebString&, blink::WebTextDirection hint) override;
+    virtual void draggableRegionsChanged() override;
 
     // Editing --------------------------------------------------------
     virtual bool handleCurrentKeyboardEvent() override;
+
+    // Called when a drag-n-drop operation should begin.
+    virtual void startDragging(blink::WebLocalFrame* frame, const blink::WebDragData& data, 
+        blink::WebDragOperationsMask mask, const blink::WebImage& image, const blink::WebPoint& dragImageOffset) override;
 
     // Return a compositing view used for this widget. This is owned by the
     // WebWidgetClient.
@@ -158,9 +171,11 @@ public:
     void loadHTMLString(int64 frameId, const blink::WebData& html, const blink::WebURL& baseURL, const blink::WebURL& unreachableURL, bool replace);
 
     void setTransparent(bool transparent);
+    void setHWND(HWND hWnd);
 
     // Session history -----------------------------------------------------
-    void didCommitProvisionalLoad(blink::WebLocalFrame* frame, const blink::WebHistoryItem& history, blink::WebHistoryCommitType type);
+    void didCommitProvisionalLoad(blink::WebLocalFrame* frame, const blink::WebHistoryItem& history, 
+        blink::WebHistoryCommitType type, bool isSameDocument);
     virtual void navigateBackForwardSoon(int offset) override;
     virtual int historyBackListCount() override;
     virtual int historyForwardListCount() override;
@@ -172,7 +187,8 @@ public:
     CefBrowserHostImpl* browser() const;
     void setBrowser(CefBrowserHostImpl* browser);
 #endif
-    blink::WebFrame* getWebFrameFromFrameId(int64 frameId);
+    blink::WebFrame* getWebFrameFromFrameId(int64_t frameId);
+    static int64_t getFirstFrameId();
 
     blink::WebView* createWkeView(blink::WebLocalFrame* creator,
         const blink::WebURLRequest& request,
@@ -187,12 +203,16 @@ public:
         blink::WebNavigationPolicy policy,
         bool suppressOpener);
 
+    virtual bool runFileChooser(const blink::WebFileChooserParams& params, blink::WebFileChooserCompletion* completion) override;
+
     // ----
     void executeMainFrame();
 
     void copyToMemoryCanvasForUi();
 
     friend class AutoRecordActions;
+
+    static int64_t m_firstFrameId;
 
     ToolTip* m_toolTip;
 
@@ -230,7 +250,8 @@ public:
     WebFrameClientImpl* m_webFrameClient;
     PlatformEventHandler* m_platformEventHandler;
 
-    blink::WebCursorInfo::Type m_cursorType;
+    blink::WebCursorInfo m_cursor;
+    HICON m_platformCursor;
 
     int m_enterCount;
     bool checkForRepeatEnter();
@@ -239,8 +260,8 @@ public:
     bool m_postCloseWidgetSoonMessage;
 
     WTF::Vector<DestroyNotif*> m_destroyNotifs;
-
-    NavigationController* m_navigationController;
+    //WTF::Vector<blink::IntRect> m_dragRegions;
+    HRGN m_draggableRegion;
 
     HWND m_popupHandle;
     int m_debugCount;
@@ -255,7 +276,17 @@ public:
     bool m_disablePaint;
     int m_firstDrawCount;
 
+    blink::Persistent<NavigationController> m_navigationController;
     blink::Persistent<PopupMenuWin> m_popup;
+
+    bool isDevToolsClient() const { return !!m_devToolsClient; }
+    DevToolsClient* m_devToolsClient;
+    DevToolsAgent* m_devToolsAgent;
+    void willEnterDebugLoop();
+    void didExitDebugLoop();
+    bool m_isEnterDebugLoop;
+
+    DragHandle* m_dragHandle;
 };
 
 } // blink

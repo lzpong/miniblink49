@@ -53,7 +53,6 @@
 #include "third_party/WebKit/Source/platform/network/HTTPParsers.h"
 #include "third_party/WebKit/Source/platform/MIMETypeRegistry.h"
 #include "third_party/WebKit/Source/web/WebLocalFrameImpl.h"
-
 #include "content/web_impl_win/WebBlobRegistryImpl.h"
 #include "content/web_impl_win/WebCookieJarCurlImpl.h"
 #include "content/web_impl_win/BlinkPlatformImpl.h"
@@ -65,6 +64,10 @@
 #include "net/BlobResourceLoader.h"
 #include "net/SharedMemoryDataConsumerHandle.h"
 #include "net/FixedReceivedData.h"
+#include "net/WebURLLoaderManagerUtil.h"
+#include "net/WebURLLoaderManagerMainTask.h"
+#include "net/FlattenHTTPBodyElement.h"
+#include "net/WebURLLoaderManagerSetupInfo.h"
 #include "third_party/WebKit/Source/wtf/Threading.h"
 #include "third_party/WebKit/Source/wtf/Vector.h"
 #include "third_party/WebKit/Source/wtf/text/CString.h"
@@ -83,201 +86,6 @@ extern WKE_FILE_OPEN g_pfnOpen;
 extern WKE_FILE_CLOSE g_pfnClose;
 
 namespace net {
-
-const int selectTimeoutMS = 5;
-const double pollTimeSeconds = 0.05;
-const int maxRunningJobs = 5;
-
-static const bool ignoreSSLErrors = true; //  ("WEBKIT_IGNORE_SSL_ERRORS");
-
-static const int kAllowedProtocols = CURLPROTO_FILE | CURLPROTO_FTP | CURLPROTO_FTPS | CURLPROTO_HTTP | CURLPROTO_HTTPS;
-
-#ifndef NDEBUG
-DEFINE_DEBUG_ONLY_GLOBAL(WTF::RefCountedLeakCounter, webURLLoaderInternalCounter, ("WebURLLoaderInternal"));
-#endif
-
-static CString certificatePath()
-{
-#if 0 
-    char* envPath = getenv("CURL_CA_BUNDLE_PATH");
-    if (envPath)
-        return envPath;
-#endif
-    return CString();
-}
-
-static char* g_cookieJarPath = nullptr;
-
-void setCookieJarFullPath(const WCHAR* path)
-{
-    if (!path)
-        return;
-
-    std::vector<char> jarPathA;
-    WTF::WCharToMByte(path, wcslen(path), &jarPathA, CP_ACP);
-    if (0 == jarPathA.size())
-        return;
-
-    if (g_cookieJarPath)
-        free(g_cookieJarPath);
-
-    const int pathLen = (MAX_PATH + 1) * sizeof(char) * 5;
-    g_cookieJarPath = (char*)malloc(pathLen);
-    memset(g_cookieJarPath, 0, pathLen);
-
-    strncpy(g_cookieJarPath, &jarPathA[0], jarPathA.size());
-}
-
-void setCookieJarPath(const WCHAR* path)
-{
-    if (!path || !::PathIsDirectoryW(path))
-        return;
-
-    Vector<WCHAR> jarPath;
-    jarPath.resize(MAX_PATH + 1);
-    wcscpy(jarPath.data(), path);
-    ::PathAppendW(jarPath.data(), L"cookies.dat");
-
-    setCookieJarFullPath(jarPath.data());
-}
-
-static char* cookieJarPath()
-{
-    if (g_cookieJarPath)
-        return g_cookieJarPath;
-    return fastStrDup("cookies.dat");
-}
-
-#if ENABLE(WEB_TIMING)
-static int milisecondsSinceRequest(double requestTime)
-{
-    return static_cast<int>((monotonicallyIncreasingTime() - requestTime) * 1000.0);
-}
-
-static void calculateWebTimingInformations(ResourceHandleInternal* job)
-{
-    double startTransfertTime = 0;
-    double preTransferTime = 0;
-    double dnslookupTime = 0;
-    double connectTime = 0;
-    double appConnectTime = 0;
-
-    curl_easy_getinfo(job->m_handle, CURLINFO_NAMELOOKUP_TIME, &dnslookupTime);
-    curl_easy_getinfo(job->m_handle, CURLINFO_CONNECT_TIME, &connectTime);
-    curl_easy_getinfo(job->m_handle, CURLINFO_APPCONNECT_TIME, &appConnectTime);
-    curl_easy_getinfo(job->m_handle, CURLINFO_STARTTRANSFER_TIME, &startTransfertTime);
-    curl_easy_getinfo(job->m_handle, CURLINFO_PRETRANSFER_TIME, &preTransferTime);
-
-    job->m_response.resourceLoadTiming().domainLookupStart = 0;
-    job->m_response.resourceLoadTiming().domainLookupEnd = static_cast<int>(dnslookupTime * 1000);
-
-    job->m_response.resourceLoadTiming().connectStart = static_cast<int>(dnslookupTime * 1000);
-    job->m_response.resourceLoadTiming().connectEnd = static_cast<int>(connectTime * 1000);
-
-    job->m_response.resourceLoadTiming().requestStart = static_cast<int>(connectTime * 1000);
-    job->m_response.resourceLoadTiming().responseStart = static_cast<int>(preTransferTime * 1000);
-
-    if (appConnectTime)
-        job->m_response.resourceLoadTiming().secureConnectionStart = static_cast<int>(connectTime * 1000);
-}
-#endif
-
-// libcurl does not implement its own thread synchronization primitives.
-// these two functions provide mutexes for cookies, and for the global DNS
-// cache.
-static Mutex* sharedResourceMutex(curl_lock_data data)
-{
-    DEFINE_STATIC_LOCAL(Mutex, cookieMutex, ());
-    DEFINE_STATIC_LOCAL(Mutex, dnsMutex, ());
-    DEFINE_STATIC_LOCAL(Mutex, shareMutex, ());
-
-    switch (data) {
-    case CURL_LOCK_DATA_COOKIE:
-        return &cookieMutex;
-    case CURL_LOCK_DATA_DNS:
-        return &dnsMutex;
-    case CURL_LOCK_DATA_SHARE:
-        return &shareMutex;
-    default:
-        ASSERT_NOT_REACHED();
-        return NULL;
-    }
-}
-
-static void curl_lock_callback(CURL* /* handle */, curl_lock_data data, curl_lock_access /* access */, void* /* userPtr */)
-{
-    if (Mutex* mutex = sharedResourceMutex(data))
-        mutex->lock();
-}
-
-static void curl_unlock_callback(CURL* /* handle */, curl_lock_data data, void* /* userPtr */)
-{
-    if (Mutex* mutex = sharedResourceMutex(data))
-        mutex->unlock();
-}
-
-inline static bool isHttpInfo(int statusCode)
-{
-    return 100 <= statusCode && statusCode < 200;
-}
-
-inline static bool isHttpRedirect(int statusCode)
-{
-    return 300 <= statusCode && statusCode < 400 && statusCode != 304;
-}
-
-inline static bool isHttpAuthentication(int statusCode)
-{
-    return statusCode == 401;
-}
-
-inline static bool isHttpNotModified(int statusCode)
-{
-    return statusCode == 304;
-}
-
-inline static bool isAppendableHeader(const String &key)
-{
-    static const char* appendableHeaders[] = {
-        "access-control-allow-headers",
-        "access-control-allow-methods",
-        "access-control-allow-origin",
-        "access-control-expose-headers",
-        "allow",
-        "cache-control",
-        "connection",
-        "content-encoding",
-        "content-language",
-        "if-match",
-        "if-none-match",
-        "keep-alive",
-        "pragma",
-        "proxy-authenticate",
-        "public",
-        "server",
-        "set-cookie",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-        "user-agent",
-        "vary",
-        "via",
-        "warning",
-        "www-authenticate",
-        0
-    };
-
-    // Custom headers start with 'X-', and need no further checking.
-    if (key.startsWith("x-", WTF::TextCaseInsensitive))
-        return true;
-
-    for (unsigned i = 0; appendableHeaders[i]; ++i)
-        if (equalIgnoringCase(key, appendableHeaders[i]))
-            return true;
-
-    return false;
-}
 
 WebURLLoaderManager::WebURLLoaderManager()
     : m_cookieJarFileName(cookieJarPath())
@@ -307,7 +115,7 @@ WebURLLoaderManager::~WebURLLoaderManager()
     curl_multi_cleanup(m_curlMultiHandle);
     curl_share_cleanup(m_curlShareHandle);
     if (m_cookieJarFileName)
-        fastFree(m_cookieJarFileName);
+        free(m_cookieJarFileName);
     curl_global_cleanup();
 }
 
@@ -366,11 +174,6 @@ void WebURLLoaderManager::initCookieSession()
 CURLSH* WebURLLoaderManager::getCurlShareHandle() const
 {
     return m_curlShareHandle;
-}
-
-void WebURLLoaderManager::setCookieJarFileName(const char* cookieJarFileName)
-{
-    m_cookieJarFileName = fastStrDup(cookieJarFileName);
 }
 
 const char* WebURLLoaderManager::getCookieJarFileName() const
@@ -543,402 +346,6 @@ void WebURLLoaderManager::handleDidReceiveResponse(WebURLLoaderInternal* job)
     job->client()->didReceiveResponse(job->loader(), response, readHandle);
 }
 
-
-// 回调回main线程的task
-class WebURLLoaderManagerMainTask : public WebThread::Task {
-public:
-    enum TaskType {
-        kWriteCallback,
-        kHeaderCallback,
-        kDidFinishLoading,
-        kRemoveFromCurl,
-        kDidCancel,
-        kHandleLocalReceiveResponse,
-        kContentEnded,
-        kDidFail,
-        kHandleHookRequest,
-    };
-
-    struct Args {
-        void* ptr;
-        size_t size;
-        size_t nmemb;
-        long httpCode;
-        double contentLength;
-        char* hdr;
-        WebURLError* resourceError;
-
-        ~Args()
-        {
-            free(ptr);
-            free(hdr);
-            delete resourceError;
-        }
-
-        static Args* build(void* ptr, size_t size, size_t nmemb, size_t totalSize, CURL* handle, bool isProxy)
-        {
-            Args* args = new Args();
-            args->size = size;
-            args->nmemb = nmemb;
-            args->ptr = malloc(totalSize);
-            args->resourceError = new WebURLError();
-            memcpy(args->ptr, ptr, totalSize);
-
-            curl_easy_getinfo(handle, !isProxy ? CURLINFO_RESPONSE_CODE : CURLINFO_HTTP_CONNECTCODE, &args->httpCode);
-
-            double contentLength = 0;
-            curl_easy_getinfo(handle, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &args->contentLength);
-
-            const char* hdr = nullptr;
-            args->hdr = nullptr;
-            int hdrLen = 0;
-            curl_easy_getinfo(handle, CURLINFO_EFFECTIVE_URL, &hdr);
-            if (hdr)
-                hdrLen = strlen(hdr);
-
-            args->hdr = (char*)malloc(hdrLen + 1);
-            strncpy(args->hdr, hdr, hdrLen);
-            args->hdr[hdrLen] = '\0';
-            return args;
-        }
-    };
-
-    virtual ~WebURLLoaderManagerMainTask() override
-    {
-        delete m_args;
-    }
-
-    void release()
-    {
-        AutoLockJob autoLockJob(WebURLLoaderManager::sharedInstance(), m_jobId);
-        autoLockJob.setNotDerefForDelete();
-        WebURLLoaderInternal* job = autoLockJob.lock();
-        if (!job)
-            return;
-
-        WTF::Mutex& liveJobsMutex = WebURLLoaderManager::sharedInstance()->m_liveJobsMutex;
-        while (true) {
-            liveJobsMutex.lock();
-            if (2 < job->getRefCount()) {
-                liveJobsMutex.unlock();
-                ::Sleep(20);
-                continue;
-            }
-
-            job->m_handle = nullptr;
-            WebURLLoaderManager::sharedInstance()->removeLiveJobs(m_jobId);
-            delete job;
-
-            liveJobsMutex.unlock();
-            break;
-        }
-    }
-
-    virtual void run() override
-    {
-        AutoLockJob autoLockJob(WebURLLoaderManager::sharedInstance(), m_jobId);
-        WebURLLoaderInternal* job = autoLockJob.lock();
-        if (!job)
-            return;
-
-        if (kRemoveFromCurl == m_type || kDidCancel == m_type) {
-            autoLockJob.setNotDerefForDelete();
-            release();
-            return;
-        }
-
-        if (WebURLLoaderManager::sharedInstance()->isShutdown() || job->m_cancelled)
-            return;
-
-        switch (m_type) {
-        case kWriteCallback:
-            handleWriteCallbackOnMainThread(m_args, job);
-            break;
-        case kHeaderCallback:
-            handleHeaderCallbackOnMainThread(m_args, job);
-            break;
-        case kDidFinishLoading:
-            if (job->m_hookBuf)
-                WebURLLoaderManager::sharedInstance()->didReceiveDataOrDownload(job, static_cast<char*>(job->m_hookBuf), job->m_hookLength, 0);
-            WebURLLoaderManager::sharedInstance()->handleDidFinishLoading(job, 0, 0);
-            break;
-        case kRemoveFromCurl:
-            break;
-        case kDidCancel:
-            break;
-        case kHandleLocalReceiveResponse:
-            handleLocalReceiveResponseOnMainThread(m_args, job);
-            break;
-        case kContentEnded:
-            if (job->m_hookBuf)
-                job->m_multipartHandle->contentReceived(static_cast<const char*>(job->m_hookBuf), job->m_hookLength);
-            job->m_multipartHandle->contentEnded();
-            break;
-        case kDidFail:
-            WebURLLoaderManager::sharedInstance()->handleDidFail(job, *(m_args->resourceError));
-            break;
-        case kHandleHookRequest:
-            handleHookRequestOnMainThread(job);
-            break;
-        default:
-            break;
-        }
-    }
-
-    static Args* pushTask(int jobId, TaskType type, void* ptr, size_t size, size_t nmemb, size_t totalSize)
-    {
-        AutoLockJob autoLockJob(WebURLLoaderManager::sharedInstance(), jobId);
-        WebURLLoaderInternal* job = autoLockJob.lock();
-        if (!job)
-            return nullptr;
-
-        Args* args = Args::build(ptr, size, nmemb, totalSize, job->m_handle, job->m_isProxy);
-        WebURLLoaderManagerMainTask* task = new WebURLLoaderManagerMainTask(jobId, type, args);
-
-        if (job->m_isSynchronous)
-            job->m_syncTasks.append(task);
-        else
-            Platform::current()->mainThread()->scheduler()->postLoadingTask(FROM_HERE, task); // postLoadingTask
-        return args;
-    }
-
-    static WebURLLoaderManagerMainTask* createTask(int jobId, TaskType type, void* ptr, size_t size, size_t nmemb, size_t totalSize)
-    {
-        AutoLockJob autoLockJob(WebURLLoaderManager::sharedInstance(), jobId);
-        WebURLLoaderInternal* job = autoLockJob.lock();
-        if (!job)
-            return nullptr;
-        Args* args = Args::build(ptr, size, nmemb, totalSize, job->m_handle, job->m_isProxy);
-        WebURLLoaderManagerMainTask* task = new WebURLLoaderManagerMainTask(jobId, type, args);
-        return task;
-    }
-
-    static size_t handleWriteCallbackOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job);
-    static size_t handleHeaderCallbackOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job);
-    static void handleLocalReceiveResponseOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job);
-    static void handleHookRequestOnMainThread(WebURLLoaderInternal* job);
-
-private:
-    int m_jobId;
-    TaskType m_type;
-    Args* m_args;
-
-    WebURLLoaderManagerMainTask(int jobId, TaskType type, Args* args)
-        : m_jobId(jobId)
-        , m_type(type)
-        , m_args(args)
-    {
-    }
-};
-
-static bool setHttpResponseDataToJobWhenDidReceiveResponseOnMainThread(WebURLLoaderInternal* job, WebURLLoaderManagerMainTask::Args* args)
-{
-    WebURLLoaderClient* client = job->client();
-    size_t size = args->size;
-    size_t nmemb = args->nmemb;
-    size_t totalSize = size * nmemb;
-
-    if (isHttpInfo(args->httpCode)) {
-        // Just return when receiving http info, e.g. HTTP/1.1 100 Continue.
-        // If not, the request might be cancelled, because the MIME type will be empty for this response.
-        return false;
-    }
-
-    if (job->firstRequest()->downloadToFile()) {
-        String tempPath = WebURLLoaderManager::sharedInstance()->handleHeaderForBlobOnMainThread(job, totalSize);
-        job->m_response.setDownloadFilePath(tempPath);
-    }
-    job->m_response.setExpectedContentLength(static_cast<long long int>(args->contentLength));
-    job->m_response.setURL(KURL(ParsedURLString, args->hdr));
-    job->m_response.setHTTPStatusCode(args->httpCode);
-    job->m_response.setMIMEType(extractMIMETypeFromMediaType(job->m_response.httpHeaderField(WebString::fromUTF8("Content-Type"))).lower());
-    job->m_response.setTextEncodingName(extractCharsetFromMediaType(job->m_response.httpHeaderField(WebString::fromUTF8("Content-Type"))));
-#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
-    if (job->m_response.httpHeaderField(WebString::fromUTF8("Content-Type")).equals("application/octet-stream")) {
-        RequestExtraData* requestExtraData = reinterpret_cast<RequestExtraData*>(job->firstRequest()->extraData());
-        WebPage* page = requestExtraData->page;
-        if (page->wkeHandler().downloadCallback) {
-            Vector<char> urlBuf = WTF::ensureStringToUTF8(job->firstRequest()->url().string(), true);
-            if (page->wkeHandler().downloadCallback(page->wkeWebView(), page->wkeHandler().downloadCallbackParam, urlBuf.data())) {
-                blink::WebLocalFrame* frame = requestExtraData->frame;
-                frame->stopLoading();
-                return true;
-            }
-        }
-    }
-#endif
-    if (equalIgnoringCase((String)(job->m_response.mimeType()), "multipart/x-mixed-replace")) {
-        String boundary;
-        bool parsed = MultipartHandle::extractBoundary(job->m_response.httpHeaderField(WebString::fromUTF8("Content-Type")), boundary);
-        if (parsed)
-            job->m_multipartHandle = adoptPtr(new MultipartHandle(job, boundary));
-    }
-
-    // HTTP redirection
-    if (isHttpRedirect(args->httpCode)) {
-        String location = job->m_response.httpHeaderField(WebString::fromUTF8("location"));
-        if (!location.isEmpty()) {
-            //重定向
-            KURL newURL = KURL((KURL)(job->firstRequest()->url()), location);
-            blink::WebURLRequest* redirectedRequest = new blink::WebURLRequest(*job->firstRequest());
-            redirectedRequest->setURL(newURL);
-            if (client && job->loader())
-                client->willSendRequest(job->loader(), *redirectedRequest, job->m_response);
-#if 0
-            String outString = String::format("redirection:%p, %s\n", job, job->m_response.url().string().utf8().c_str());
-            OutputDebugStringW(outString.charactersWithNullTermination().data());
-#endif
-            job->m_response.initialize();
-
-            delete job->m_firstRequest;
-            job->m_firstRequest = redirectedRequest;
-            return false;
-        }
-    } else if (isHttpAuthentication(args->httpCode)) {
-
-    }
-
-    return true;
-}
-
-static void setResponseDataToJobWhenDidReceiveResponseOnMainThread(WebURLLoaderInternal* job, WebURLLoaderManagerMainTask::Args* args)
-{
-    KURL url = job->firstRequest()->url();
-    bool needSetResponseFired = true;
-
-    if (url.protocolIsInHTTPFamily())
-        needSetResponseFired = setHttpResponseDataToJobWhenDidReceiveResponseOnMainThread(job, args);
-    
-    if (needSetResponseFired && !job->m_cancelled) {
-        if (job->client() && job->loader())
-            WebURLLoaderManager::sharedInstance()->handleDidReceiveResponse(job);
-        job->setResponseFired(true);
-    }
-}
-
-void WebURLLoaderManagerMainTask::handleLocalReceiveResponseOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job)
-{
-    if (job->responseFired())
-        return;
-
-    // since the code in headerCallbackOnIoThread will not have run for local files
-    // the code to set the KURL and fire didReceiveResponse is never run,
-    // which means the ResourceLoader's response does not contain the KURL.
-    // Run the code here for local files to resolve the issue.
-    // TODO: See if there is a better approach for handling this.
-    job->m_response.setURL(KURL(ParsedURLString, args->hdr));
-
-    setResponseDataToJobWhenDidReceiveResponseOnMainThread(job, args);
-
-//     if (job->client() && job->loader() && !job->responseFired())
-//         WebURLLoaderManager::sharedInstance()->handleDidReceiveResponse(job);
-//     job->setResponseFired(true);
-}
-
-// called with data after all headers have been processed via headerCallbackOnIoThread
-size_t WebURLLoaderManagerMainTask::handleWriteCallbackOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job)
-{
-    void* ptr = args->ptr;
-    size_t size = args->size;
-    size_t nmemb = args->nmemb;
-
-    size_t totalSize = size * nmemb;
-
-    if (!job->responseFired()) {
-        handleLocalReceiveResponseOnMainThread(args, job);
-        if (job->m_cancelled)
-            return 0;
-    }
-
-    if (job->m_isHookRequest) {
-        if (!job->m_hookBuf) {
-            job->m_hookBuf = malloc(totalSize);
-        } else {
-            job->m_hookBuf = realloc(job->m_hookBuf, job->m_hookLength + totalSize);
-        }
-        memcpy(((char *)job->m_hookBuf + job->m_hookLength), ptr, totalSize);
-        job->m_hookLength += totalSize;
-        return totalSize;
-    }
-
-    if (job->m_multipartHandle) {
-        job->m_multipartHandle->contentReceived(static_cast<const char*>(ptr), totalSize);
-    } else if (job->client() && job->loader()) {
-        WebURLLoaderManager::sharedInstance()->didReceiveDataOrDownload(job, static_cast<char*>(ptr), totalSize, 0);
-    }
-    return totalSize;
-}
-
-size_t WebURLLoaderManagerMainTask::handleHeaderCallbackOnMainThread(WebURLLoaderManagerMainTask::Args* args, WebURLLoaderInternal* job)
-{
-    if (job->m_cancelled)
-        return 0;
-
-    // We should never be called when deferred loading is activated.
-    ASSERT(!job->m_defersLoading);
-
-    size_t totalSize = args->size * args->nmemb;
-    WebURLLoaderClient* client = job->client();
-
-    String header(static_cast<const char*>(args->ptr), totalSize);
-
-    String url = job->firstRequest()->url().string();
-
-    /*
-    * a) We can finish and send the ResourceResponse
-    * b) We will add the current header to the HTTPHeaderMap of the ResourceResponse
-    *
-    * The HTTP standard requires to use \r\n but for compatibility it recommends to
-    * accept also \n.
-    */
-    if (header == String("\r\n") || header == String("\n")) {       
-        setResponseDataToJobWhenDidReceiveResponseOnMainThread(job, args);
-        return totalSize;
-    } else {
-        int splitPos = header.find(":");
-        if (splitPos != -1) {
-            String key = header.left(splitPos).stripWhiteSpace();
-            String value = header.substring(splitPos + 1).stripWhiteSpace();
-
-            if (isAppendableHeader(key))
-                job->m_response.addHTTPHeaderField(key, value);
-            else
-                job->m_response.setHTTPHeaderField(key, value);
-        } else if (header.startsWith("HTTP", WTF::TextCaseInsensitive)) {
-            // This is the first line of the response.
-            // Extract the http status text from this.
-            //
-            // If the FOLLOWLOCATION option is enabled for the curl handle then
-            // curl will follow the redirections internally. Thus this header callback
-            // will be called more than one time with the line starting "HTTP" for one job.
-            String httpCodeString = String::number(args->httpCode);
-            if (job->m_isProxy && 0 == args->httpCode)
-                httpCodeString = "200";
-            int statusCodePos = header.find(httpCodeString);
-
-            if (statusCodePos != -1) {
-                // The status text is after the status code.
-                String status = header.substring(statusCodePos + httpCodeString.length());
-                job->m_response.setHTTPStatusText(status.stripWhiteSpace());
-            }
-        }
-    }
-
-    return totalSize;
-}
-
-void WebURLLoaderManagerMainTask::handleHookRequestOnMainThread(WebURLLoaderInternal* job)
-{
-    RequestExtraData* requestExtraData = reinterpret_cast<RequestExtraData*>(job->firstRequest()->extraData());
-    content::WebPage* page = requestExtraData->page;
-    if (page->wkeHandler().loadUrlEndCallback) {
-        Vector<char> urlBuf = WTF::ensureStringToUTF8(job->firstRequest()->url().string(), true);
-        page->wkeHandler().loadUrlEndCallback(page->wkeWebView(), page->wkeHandler().loadUrlEndCallbackParam,
-            urlBuf.data(), job,
-            job->m_hookBuf, job->m_hookLength);
-    }
-}
-
 // called with data after all headers have been processed via headerCallbackOnIoThread
 static size_t writeCallbackOnIoThread(void* ptr, size_t size, size_t nmemb, void* data)
 {
@@ -959,7 +366,7 @@ static size_t writeCallbackOnIoThread(void* ptr, size_t size, size_t nmemb, void
     // of html page even if it is a redirect that was handled internally
     // can be observed e.g. on gmail.com
     long httpCode = 0;
-    CURLcode err = curl_easy_getinfo(job->m_handle, CURLINFO_RESPONSE_CODE, &httpCode);
+    CURLcode err = curl_easy_getinfo(job->m_handle, !job->m_isProxy ? CURLINFO_RESPONSE_CODE : CURLINFO_HTTP_CONNECTCODE, &httpCode);
     if (CURLE_OK == err && httpCode >= 300 && httpCode < 400)
         return totalSize;
 
@@ -969,7 +376,7 @@ static size_t writeCallbackOnIoThread(void* ptr, size_t size, size_t nmemb, void
 
 static bool checkIsProxyHead(WebURLLoaderInternal* job, char* ptr, size_t size)
 {
-    if (0 == size)
+    if (0 == size || !job->m_isProxy)
         return false;
 
     Vector<char> buffer;
@@ -1022,29 +429,29 @@ size_t readCallbackOnIoThread(void* ptr, size_t size, size_t nmemb, void* data)
     if (!size || !nmemb)
         return 0;
 
-    //     if (!job->m_formDataStream.hasMoreElements())
-    //         return 0;
-    // 
-    //     size_t sent = job->m_formDataStream.read(ptr, size, nmemb);
-    // 
-    //     // Something went wrong so cancel the job.
-    //     if (!sent && job->loader())
-    //         job->loader()->cancel();
-    // 
-    //     return sent;
-
-    size_t sentSize = job->m_postBytes.size() - job->m_postBytesReadOffset;
-    if (0 == sentSize)
+    if (!job->m_formDataStream->hasMoreElements())
         return 0;
 
-    if (size * nmemb <= sentSize)
-        sentSize = size * nmemb;
+    size_t sent = job->m_formDataStream->read(ptr, size, nmemb);
 
-    memcpy(ptr, job->m_postBytes.data() + job->m_postBytesReadOffset, sentSize);
-    job->m_postBytesReadOffset += sentSize;
-    ASSERT(job->m_postBytesReadOffset <= job->m_postBytes.size());
+    // Something went wrong so cancel the job.
+    if (!sent && job->loader())
+        job->loader()->cancel();
 
-    return sentSize;
+    return sent;
+
+//     size_t sentSize = job->m_postBytes.size() - job->m_postBytesReadOffset;
+//     if (0 == sentSize)
+//         return 0;
+// 
+//     if (size * nmemb <= sentSize)
+//         sentSize = size * nmemb;
+// 
+//     memcpy(ptr, job->m_postBytes.data() + job->m_postBytesReadOffset, sentSize);
+//     job->m_postBytesReadOffset += sentSize;
+//     ASSERT(job->m_postBytesReadOffset <= job->m_postBytes.size());
+// 
+//     return sentSize;
 }
 
 bool WebURLLoaderManager::downloadOnIoThread()
@@ -1214,48 +621,6 @@ static inline size_t getFormElementsCount(WebURLLoaderInternal* job)
     return httpBody.elementCount();
 }
 
-struct SetupDataInfo {
-    CURLoption sizeOption;
-    curl_off_t size;
-    bool islongLong;
-};
-
-struct SetupInfoBase {
-    SetupDataInfo* data;
-
-    SetupInfoBase() { data = nullptr; }
-
-    ~SetupInfoBase()
-    {
-        if (data)
-            delete data;
-    }
-};
-
-struct SetupPutInfo : public SetupInfoBase {
-};
-
-struct SetupPostInfo : public SetupInfoBase {
-};
-
-struct SetupHttpMethodInfo {
-    SetupHttpMethodInfo()
-    {
-        put = nullptr;
-        post = nullptr;
-    }
-
-    ~SetupHttpMethodInfo()
-    {
-        if (put)
-            delete put;
-        if (post)
-            delete post;
-    }
-    SetupPutInfo* put;
-    SetupPostInfo* post;
-};
-
 static void setupFormDataOnIoThread(WebURLLoaderInternal* job, SetupDataInfo* info)
 {
     if (info) {
@@ -1265,11 +630,14 @@ static void setupFormDataOnIoThread(WebURLLoaderInternal* job, SetupDataInfo* in
             curl_easy_setopt(job->m_handle, info->sizeOption, (int)info->size);
     }
 
+    ASSERT(!job->m_formDataStream);
+    job->m_formDataStream = new FlattenHTTPBodyElementStream(info->flattenElements);
     curl_easy_setopt(job->m_handle, CURLOPT_READFUNCTION, readCallbackOnIoThread);
-    curl_easy_setopt(job->m_handle, CURLOPT_READDATA, job);
+    curl_easy_setopt(job->m_handle, CURLOPT_READDATA, job->m_id);
 }
 
-SetupDataInfo* setupFormDataOnMainThread(WebURLLoaderInternal* job, CURLoption sizeOption, struct curl_slist** headers)
+
+static SetupDataInfo* setupFormDataOnMainThread(WebURLLoaderInternal* job, CURLoption sizeOption, struct curl_slist** headers)
 {
     WebHTTPBody httpBody = job->firstRequest()->httpBody();
 
@@ -1283,39 +651,67 @@ SetupDataInfo* setupFormDataOnMainThread(WebURLLoaderInternal* job, CURLoption s
         else
             expectedSizeOfCurlOffT = sizeof(int);
     }
-
+    
     static const long long maxCurlOffT = (1LL << (expectedSizeOfCurlOffT * 8 - 1)) - 1;
     // Obtain the total size of the form data
     curl_off_t size = 0;
     bool chunkedTransfer = false;
+    SetupDataInfo* result = new SetupDataInfo();
+    
     for (size_t i = 0; i < httpBody.elementCount(); ++i) {
         WebHTTPBody::Element element;
         if (!httpBody.elementAt(i, element))
             continue;
 
+        FlattenHTTPBodyElement* flattenElement = nullptr;
         if (WebHTTPBody::Element::TypeFile == element.type) {
-            // long long fileSizeResult;
-            //             if (getFileSize(element.m_filename, fileSizeResult)) {
-            //                 if (fileSizeResult > maxCurlOffT) {
-            //                     // File size is too big for specifying it to cURL
-            //                     chunkedTransfer = true;
-            //                     break;
-            //                 }
-            //                 size += fileSizeResult;
-            //             } else {
-            //                 chunkedTransfer = true;
-            //                 break;
-            //             }
-        } else
+            long long fileSizeResult;
+            if (getFileSize(element.filePath, fileSizeResult)) {
+                if (fileSizeResult > maxCurlOffT) {
+                    // File size is too big for specifying it to cURL
+                    chunkedTransfer = true;
+                    break;
+                }
+                size += fileSizeResult;
+            } else {
+                chunkedTransfer = true;
+                break;
+            }
+
+            flattenElement = new FlattenHTTPBodyElement();
+            flattenElement->type = WebHTTPBody::Element::TypeFile;
+            Vector<UChar> filePath = WTF::ensureUTF16UChar(element.filePath, true);
+            flattenElement->filePath = filePath.data();
+        } else if (WebHTTPBody::Element::TypeData == element.type) {
             size += element.data.size();
+
+            flattenElement = new FlattenHTTPBodyElement();
+            flattenElement->type = WebHTTPBody::Element::TypeData;
+            flattenElement->data.append(element.data.data(), element.data.size());
+        } else if (WebHTTPBody::Element::TypeBlob == element.type) {
+            WebBlobRegistryImpl* blobReg = (WebBlobRegistryImpl*)blink::Platform::current()->blobRegistry();
+            net::BlobDataWrap* blobData = blobReg->getBlobDataFromUUID(element.blobUUID);
+            if (!blobData)
+                continue;
+
+            flattenElement = new FlattenHTTPBodyElement();
+            flattenElement->type = WebHTTPBody::Element::TypeData;
+
+            const Vector<blink::WebBlobData::Item*>& items = blobData->items();
+            for (size_t i = 0; i < items.size(); ++i) {
+                blink::WebBlobData::Item* item = items[i];
+                flattenElement->data.append(item->data.data(), item->data.size());
+                size += item->data.size();
+            }
+        }
+        if (flattenElement)
+            result->flattenElements.append(flattenElement);
     }
 
-    SetupDataInfo* result = nullptr;
     // cURL guesses that we want chunked encoding as long as we specify the header
     if (chunkedTransfer)
         *headers = curl_slist_append(*headers, "Transfer-Encoding: chunked");
     else {
-        result = new SetupDataInfo();
         result->sizeOption = sizeOption;
         result->size = size;
         result->islongLong = (sizeof(long long) == expectedSizeOfCurlOffT);
@@ -1350,29 +746,40 @@ static SetupPutInfo* setupPutOnMainThread(WebURLLoaderInternal* job, struct curl
     return result;
 }
 
-static void flattenHttpBody(const WebHTTPBody& httpBody, WTF::Vector<char>* data)
-{
-    for (size_t i = 0; i < httpBody.elementCount(); ++i) {
-        WebHTTPBody::Element element;
-        if (!httpBody.elementAt(i, element))
-            continue;
-
-        if (WebHTTPBody::Element::TypeData == element.type) {
-            data->append(element.data.data(), element.data.size());
-        } else if (WebHTTPBody::Element::TypeBlob == element.type) {
-            WebBlobRegistryImpl* blobReg = (WebBlobRegistryImpl*)blink::Platform::current()->blobRegistry();
-            net::BlobDataWrap* blobData = blobReg->getBlobDataFromUUID(element.blobUUID);
-            if (!blobData)
-                continue;
-
-            const Vector<blink::WebBlobData::Item*>& items = blobData->items();
-            for (size_t i = 0; i < items.size(); ++i) {
-                blink::WebBlobData::Item* item = items[i];
-                data->append(item->data.data(), item->data.size());
-            }
-        }
-    }
-}
+// static void flattenHttpBody(const WebHTTPBody& httpBody, std::vector<FlattenHTTPBodyElement*>* data)
+// {
+//     for (size_t i = 0; i < httpBody.elementCount(); ++i) {
+//         WebHTTPBody::Element element;
+//         if (!httpBody.elementAt(i, element))
+//             continue;
+// 
+//         FlattenHTTPBodyElement* flattenElement = nullptr;
+//         if (WebHTTPBody::Element::TypeData == element.type) {
+//             flattenElement = new FlattenHTTPBodyElement();
+//             flattenElement->type = WebHTTPBody::Element::TypeData;
+//             flattenElement->data.append(element.data.data(), element.data.size());
+//         } else if (WebHTTPBody::Element::TypeBlob == element.type) {
+//             WebBlobRegistryImpl* blobReg = (WebBlobRegistryImpl*)blink::Platform::current()->blobRegistry();
+//             net::BlobDataWrap* blobData = blobReg->getBlobDataFromUUID(element.blobUUID);
+//             if (!blobData)
+//                 continue;
+//             flattenElement->type = WebHTTPBody::Element::TypeData;
+// 
+//             const Vector<blink::WebBlobData::Item*>& items = blobData->items();
+//             for (size_t i = 0; i < items.size(); ++i) {
+//                 blink::WebBlobData::Item* item = items[i];
+//                 flattenElement->data.append(item->data.data(), item->data.size());
+//             }
+//         } else if (WebHTTPBody::Element::TypeFile == element.type) {
+//             flattenElement = new FlattenHTTPBodyElement();
+//             flattenElement->type = WebHTTPBody::Element::TypeFile;
+//             Vector<UChar> filePath = WTF::ensureUTF16UChar(element.filePath, true);
+//             flattenElement->filePath = filePath.data();
+//         }
+//         if (flattenElement)
+//             data->push_back(flattenElement);
+//     }
+// }
 
 static void setupPostOnIoThread(WebURLLoaderInternal* job, SetupPostInfo* info)
 {
@@ -1383,13 +790,19 @@ static void setupPostOnIoThread(WebURLLoaderInternal* job, SetupPostInfo* info)
         return;
     }
 
-    if (0 != job->m_postBytes.size()) {
-        curl_easy_setopt(job->m_handle, CURLOPT_POSTFIELDSIZE, job->m_postBytes.size());
-        curl_easy_setopt(job->m_handle, CURLOPT_POSTFIELDS, job->m_postBytes.data());
+    if (info->data && 1 == info->data->flattenElements.size()) {
+        FlattenHTTPBodyElement* element = info->data->flattenElements[0];
+        if (WebHTTPBody::Element::TypeData == element->type || WebHTTPBody::Element::TypeBlob == element->type) {
+            curl_easy_setopt(job->m_handle, CURLOPT_POSTFIELDSIZE, element->data.size());
+            curl_easy_setopt(job->m_handle, CURLOPT_COPYPOSTFIELDS, element->data.data());
+
+            delete element;
+            return;
+        }
     }
 
-//     if (info->data)
-//         setupFormDataOnIoThread(job, info->data);
+    if (info->data)
+        setupFormDataOnIoThread(job, info->data);
 }
 
 static SetupPostInfo* setupPostOnMainThread(WebURLLoaderInternal* job, struct curl_slist** headers)
@@ -1405,8 +818,8 @@ static SetupPostInfo* setupPostOnMainThread(WebURLLoaderInternal* job, struct cu
 //         flattenHttpBody(job->firstRequest()->httpBody(), &job->m_postBytes);
 //         return result;
 //     }
-
-    flattenHttpBody(job->firstRequest()->httpBody(), &job->m_postBytes);
+// 
+//     flattenHttpBody(job->firstRequest()->httpBody(), &job->m_postBytes);
     result->data = setupFormDataOnMainThread(job, CURLOPT_POSTFIELDSIZE_LARGE, headers);
     return result;
 }
@@ -1439,6 +852,18 @@ private:
     bool m_start;
 };
 
+const int kBlackListCancelJobId = -2;
+
+static void releaseJobWithoutCurl(WebURLLoaderInternal* job, int jobId)
+{
+    if (kBlackListCancelJobId == jobId)
+        return;
+    RELEASE_ASSERT(job->m_ref == 0);
+    job->m_handle = nullptr;
+    WebURLLoaderManager::sharedInstance()->removeLiveJobs(jobId);
+    delete job;
+}
+
 class WkeAsynTask : public WebThread::Task {
 public:
     WkeAsynTask(WebURLLoaderManager* manager, int jobId)
@@ -1454,15 +879,32 @@ public:
     virtual void run() override
     {
         WebURLLoaderInternal* job = m_manager->checkJob(m_jobId);
-        if (!job || job->m_cancelled)
+        if (!job || job->m_cancelled) {
+            releaseJobWithoutCurl(job, m_jobId);
             return;
+        }
+        KURL url = job->firstRequest()->url();
+        job->m_response.setURL(url);
 
-        job->m_response.setURL(job->firstRequest()->url());
+        if (job->m_response.mimeType().isNull() || job->m_response.mimeType().isEmpty()) {
+            String urlString = url.getUTF8String();
+            int urlHostLength = urlString.length();
+            for (int i = 0; i < urlHostLength; ++i) {
+                if ('?' != urlString[i])
+                    continue;
+                urlHostLength = i;
+                break;
+            }
+            String urlWithoutQuery(urlString.characters8(), urlHostLength);
+            job->m_response.setMIMEType(MIMETypeRegistry::getMIMETypeForPath(urlWithoutQuery));
+        }
+
         job->client()->didReceiveResponse(job->loader(), job->m_response);
         if (job->m_asynWkeNetSetData && !job->m_cancelled) { // 可能在didReceiveResponse里被cancel
             WebURLLoaderManager::sharedInstance()->didReceiveDataOrDownload(job, static_cast<char*>(job->m_asynWkeNetSetData), job->m_asynWkeNetSetDataLength, 0);
             WebURLLoaderManager::sharedInstance()->handleDidFinishLoading(job, WTF::currentTime(), 0);
         }
+        releaseJobWithoutCurl(job, m_jobId);
     }
 
 private:
@@ -1476,13 +918,15 @@ public:
     {
         m_manager = manager;
         m_jobId = jobId;
+        WebURLLoaderInternal* job = m_manager->checkJob(m_jobId);
+        job->m_isBlackList = true;
     }
 
     ~BlackListCancelTask() override
     {
     }
 
-    static void cancel(WebURLLoaderInternal* job)
+    static void cancel(WebURLLoaderInternal* job, int jobId)
     {
         job->m_isBlackList = true;
         job->m_response.setURL(job->firstRequest()->url());
@@ -1497,6 +941,7 @@ public:
             WebURLLoaderManager::sharedInstance()->handleDidFail(job, error);
             RELEASE_ASSERT(job->m_cancelled);
         }
+        releaseJobWithoutCurl(job, jobId);
     }
 
     virtual void run() override
@@ -1505,7 +950,7 @@ public:
         if (!job || job->m_cancelled)
             return;
 
-        cancel(job);
+        cancel(job, m_jobId);
     }
 
 private:
@@ -1659,13 +1104,14 @@ int WebURLLoaderManager::addAsynchronousJob(WebURLLoaderInternal* job)
     KURL kurl = job->firstRequest()->url();
     String url = WTF::ensureStringToUTF8String(kurl.string());
 #if 0
-    String outString = String::format("addAsynchronousJob : %d, %s\n", m_liveJobs.size(), WTF::ensureStringToUTF8(url, true).data());
-    OutputDebugStringW(outString.charactersWithNullTermination().data());
-
-    if (WTF::kNotFound != url.find("ensearch=1"))
-        OutputDebugStringA("ensearch=1!\n");
+    //if (WTF::kNotFound != url.find("nav_sprite_v") || WTF::kNotFound != url.find("products_sprites")) 
+    {
+        String outString = String::format("addAsynchronousJob : %d, %s\n", m_liveJobs.size(), WTF::ensureStringToUTF8(url, true).data());
+        OutputDebugStringW(outString.charactersWithNullTermination().data());
+    }
 #endif
 
+    String referer = job->firstRequest()->httpHeaderField(WebString::fromUTF8("referer"));
     job->m_manager = this;
 
     int jobId = 0;
@@ -1815,12 +1261,11 @@ static bool dispatchWkeLoadUrlBegin(WebURLLoaderInternal* job)
         return false;
 
     Vector<char> urlBuf = WTF::ensureStringToUTF8(job->firstRequest()->url().string(), true);
-    if (!page->wkeHandler().loadUrlBeginCallback(page->wkeWebView(),
+    bool b = page->wkeHandler().loadUrlBeginCallback(page->wkeWebView(),
         page->wkeHandler().loadUrlBeginCallbackParam,
-        urlBuf.data(), job))
-        return false;
+        urlBuf.data(), job);
 
-    return true;
+    return job->m_isWkeNetSetDataBeSetted || b;
 }
 #endif
 
@@ -1853,23 +1298,22 @@ void WebURLLoaderManager::applyAuthenticationToRequest(WebURLLoaderInternal* han
     //         }
     //     }
     // 
-    //     String user = job->m_user;
-    //     String password = job->m_pass;
-    // 
-    //     if (!job->m_initialCredential.isEmpty()) {
-    //         user = job->m_initialCredential.user();
-    //         password = job->m_initialCredential.password();
-    //         curl_easy_setopt(job->m_handle, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
-    //     }
-    // 
-    //     // It seems we need to set CURLOPT_USERPWD even if username and password is empty.
-    //     // Otherwise cURL will not automatically continue with a new request after a 401 response.
-    // 
-    //     // curl CURLOPT_USERPWD expects username:password
-    //     String userpass = user + ":" + password;
-    //     curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, userpass.utf8().data());
+    String user = job->m_user;
+    String password = job->m_pass;
 
-    curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, ":");
+//     if (!job->m_initialCredential.isEmpty()) {
+//         user = job->m_initialCredential.user();
+//         password = job->m_initialCredential.password();
+//         curl_easy_setopt(job->m_handle, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+//     }
+
+    // It seems we need to set CURLOPT_USERPWD even if username and password is empty.
+    // Otherwise cURL will not automatically continue with a new request after a 401 response.
+
+    // curl CURLOPT_USERPWD expects username:password
+    String userpass = user + ":" + password;
+    curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, userpass.utf8().data());
+    //curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, ":");
 }
 
 class HeaderVisitor : public blink::WebHTTPHeaderVisitor {
@@ -1946,20 +1390,27 @@ WebURLLoaderManager::InitializeHandleInfo* WebURLLoaderManager::preInitializeHan
 #endif
     info->method = job->firstRequest()->httpMethod().utf8();
 
+    String contentType = job->firstRequest()->httpHeaderField("Content-Type");
+    if (WTF::kNotFound == url.host().find("apple.com") && // 苹果开发者网，非要去掉0长度的Content-Type字段
+        WTF::kNotFound == url.host().find("dtcms.net")
+        && contentType.isNull()
+        && "POST" == info->method
+        && job->firstRequest()->httpBody().isNull())
+        job->firstRequest()->setHTTPHeaderField("Content-Type", ""); // 修复火币网登录不了的bug
+
     curl_slist* headers = nullptr;
     HeaderVisitor visitor(&headers);
     job->firstRequest()->visitHTTPHeaderFields(&visitor);
 
-    String method = job->firstRequest()->httpMethod();
-    if ("GET" == method) {
+    if ("GET" == info->method) {
 
-    } else if ("POST" == method) {
+    } else if ("POST" == info->method) {
         info->methodInfo = new SetupHttpMethodInfo();
         info->methodInfo->post = setupPostOnMainThread(job, &headers);
-    } else if ("PUT" == method) {
+    } else if ("PUT" == info->method) {
         info->methodInfo = new SetupHttpMethodInfo();
         info->methodInfo->put = setupPutOnMainThread(job, &headers);
-    } else if ("HEAD" == method) {
+    } else if ("HEAD" == info->method) {
 
     } else {
         info->methodInfo = new SetupHttpMethodInfo();
@@ -2053,8 +1504,10 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
 
     curl_easy_setopt(job->m_handle, CURLOPT_URL, job->m_url);
 
-    if (m_cookieJarFileName)
+    if (m_cookieJarFileName) {
         curl_easy_setopt(job->m_handle, CURLOPT_COOKIEJAR, m_cookieJarFileName);
+        curl_easy_setopt(job->m_handle, CURLOPT_COOKIEFILE, m_cookieJarFileName);
+    }
 
     if ("GET" == info->method) {
         curl_easy_setopt(job->m_handle, CURLOPT_HTTPGET, TRUE);
@@ -2071,16 +1524,19 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
     if (info->headers) {
         curl_easy_setopt(job->m_handle, CURLOPT_HTTPHEADER, info->headers);
         job->m_customHeaders = info->headers;
+        RELEASE_ASSERT(!job->m_asynWkeNetSetData);
     }
 
-    curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, ":");
+    // curl_easy_setopt(job->m_handle, CURLOPT_USERPWD, ":");
+
+    applyAuthenticationToRequest(job, job->firstRequest());
 
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     if (info->proxy.size()) {
         job->m_isProxy = true;
         curl_easy_setopt(job->m_handle, CURLOPT_PROXY, info->proxy.c_str());
         curl_easy_setopt(job->m_handle, CURLOPT_PROXYTYPE, info->proxyType);
-    }
+    }  
 
     if (info->wkeNetInterface.size())
         curl_easy_setopt(job->m_handle, CURLOPT_INTERFACE, info->wkeNetInterface.c_str());
@@ -2101,7 +1557,7 @@ void WebURLLoaderManager::timeoutOnMainThread(int jobId)
     OutputDebugStringA(kUrl.string().utf8().data());
     OutputDebugStringW(L"\n");
 
-    BlackListCancelTask::cancel(job);
+    BlackListCancelTask::cancel(job, kBlackListCancelJobId);
     cancel(jobId);
 }
 
@@ -2152,6 +1608,10 @@ void WebURLLoaderManager::startOnIoThread(int jobId)
     }
 }
 
+#ifndef NDEBUG
+DEFINE_DEBUG_ONLY_GLOBAL(WTF::RefCountedLeakCounter, webURLLoaderInternalCounter, ("WebURLLoaderInternal"));
+#endif
+
 WebURLLoaderInternal::WebURLLoaderInternal(WebURLLoaderImplCurl* loader, const WebURLRequest& request, WebURLLoaderClient* client, bool defersLoading, bool shouldContentSniff)
     : m_ref(0)
     , m_id(0)
@@ -2192,7 +1652,8 @@ WebURLLoaderInternal::WebURLLoaderInternal(WebURLLoaderImplCurl* loader, const W
     m_isDataUrl = false;
     m_isProxy = false;
     m_isProxyHeadRequest = false;
-    m_postBytesReadOffset = 0;
+    //m_postBytesReadOffset = 0;
+    m_formDataStream = nullptr;
 
 #ifndef NDEBUG
     webURLLoaderInternalCounter.increment();
@@ -2205,6 +1666,17 @@ WebURLLoaderInternal::~WebURLLoaderInternal()
     delete m_firstRequest;
 
     fastFree(m_url);
+
+#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
+    if (m_hookBuf)
+        free(m_hookBuf);
+
+    if (m_asynWkeNetSetData) {
+        RELEASE_ASSERT(!m_customHeaders);
+        free(m_asynWkeNetSetData);
+    }
+#endif
+
     if (m_customHeaders)
         curl_slist_free_all(m_customHeaders);
 
@@ -2213,12 +1685,8 @@ WebURLLoaderInternal::~WebURLLoaderInternal()
         m_bodyStreamWriter = nullptr;
     }
 
-#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
-    if (m_hookBuf)
-        free(m_hookBuf);
-    if (m_asynWkeNetSetData)
-        free(m_asynWkeNetSetData);
-#endif
+    if (m_formDataStream)
+        delete m_formDataStream;
 
 #ifndef NDEBUG
     webURLLoaderInternalCounter.decrement();
