@@ -4,9 +4,9 @@
 
 #include "content/browser/WebPage.h"
 
-//cexer: 必须包含在后面，因为其中的 wke.h -> windows.h 会定义 max、min，导致 blink 内部的 max、min 出现错乱。
-#include "wkeWebView.h"
-#include "wkeJsBind.h"
+#include "wke/wkeWebView.h"
+#include "wke/wkeJsBind.h"
+#include "wke/wkeRecordExceptionInfo.h"
 
 #include "content/web_impl_win/BlinkPlatformImpl.h"
 #include "content/web_impl_win/WebCookieJarCurlImpl.h"
@@ -17,8 +17,10 @@
 #include "third_party/WebKit/public/web/WebScriptSource.h"
 #include "third_party/WebKit/Source/web/WebViewImpl.h"
 #include "third_party/WebKit/Source/web/WebSettingsImpl.h"
+#include "third_party/WebKit/Source/platform/UserGestureIndicator.h"
 #include "third_party/WebKit/Source/bindings/core/v8/ExceptionState.h"
 #include "third_party/WebKit/Source/wtf/text/WTFStringUtil.h"
+#include "net/ActivatingObjCheck.h"
 
 #undef  PURE
 #define PURE = 0;
@@ -35,11 +37,14 @@ CWebView::CWebView()
     , m_awake(true)
     , m_title("", 0)
     , m_cookie("", 0)
-    , m_name("", 0)
+    , m_name("miniblink", 0)
     , m_url("", 0)
     , m_isCokieEnabled(true)
     , m_isCreatedDevTools(false)
 {
+    m_id = net::ActivatingObjCheck::inst()->genId();
+    net::ActivatingObjCheck::inst()->add(m_id);
+
     _initPage();
     _initHandler();
     _initMemoryDC();
@@ -50,6 +55,7 @@ CWebView::CWebView()
 
 CWebView::~CWebView()
 {
+    net::ActivatingObjCheck::inst()->remove(m_id);
     m_webPage->close();
 }
 
@@ -260,11 +266,24 @@ static String createMemoryUrl()
 
 void CWebView::loadHTML(const utf8* html)
 {
+    loadHtmlWithBaseUrl(html, nullptr);
+}
+
+void CWebView::loadHtmlWithBaseUrl(const utf8* html, const utf8* baseUrl)
+{
     size_t length = strlen(html);
     if (0 == length)
         return;
     String url = createMemoryUrl(); // String::format("MemoryURL://data.com/%d", GetTickCount());
-    m_webPage->loadHTMLString(content::WebPage::kMainFrameId, blink::WebData(html, length), blink::KURL(blink::ParsedURLString, url), blink::WebURL(), true);
+
+    blink::KURL kurl(blink::ParsedURLString, url);
+    blink::KURL kbaseUrl;
+    if (baseUrl)
+        kbaseUrl = blink::KURL(blink::ParsedURLString, baseUrl);
+    if (!kbaseUrl.isValid())
+        kbaseUrl = kurl;
+
+    m_webPage->loadHTMLString(content::WebPage::kMainFrameId, blink::WebData(html, length), kbaseUrl, kbaseUrl, true);
 }
 
 void CWebView::loadHTML(const wchar_t* html)
@@ -322,18 +341,21 @@ bool CWebView::isLoading() const
 bool CWebView::isLoadingSucceeded() const
 {
     content::WebFrameClientImpl* frameClient = m_webPage->webFrameClientImpl();
-    return frameClient->isLoaded();
+    bool b = frameClient->isLoaded();
+    return b;
 }
 
 bool CWebView::isLoadingFailed() const
 {
     content::WebFrameClientImpl* frameClient = m_webPage->webFrameClientImpl();
-    return frameClient->isLoadFailed();
+    bool b = frameClient->isLoadFailed();
+    return b;
 }
 
 bool CWebView::isLoadingCompleted() const
 {
-    return isLoadingSucceeded() || isLoadingFailed();
+    bool b = isLoadingSucceeded() || isLoadingFailed();
+    return b;
 }
 
 bool CWebView::isDocumentReady() const
@@ -361,6 +383,16 @@ void CWebView::stopLoading()
 void CWebView::reload()
 {
     m_webPage->mainFrame()->reload();
+}
+
+void CWebView::goToOffset(int offset)
+{
+    m_webPage->goToOffset(offset);
+}
+
+void CWebView::goToIndex(int index)
+{
+    m_webPage->goToIndex(index);
 }
 
 const utf8* CWebView::title()
@@ -865,6 +897,8 @@ wkeWebFrameHandle CWebView::frameIdTowkeWebFrameHandle(content::WebPage* page, i
 
 static jsValue runJsImpl(blink::WebFrame* mainFrame, String* codeString, bool isInClosure)
 {
+    blink::UserGestureIndicator gestureIndicator(blink::DefinitelyProcessingUserGesture);
+
     if (codeString->startsWith("javascript:", WTF::TextCaseInsensitive))
         codeString->remove(0, sizeof("javascript:") - 1);
     if (isInClosure) {
@@ -880,6 +914,8 @@ static jsValue runJsImpl(blink::WebFrame* mainFrame, String* codeString, bool is
     v8::HandleScope handleScope(blink::toIsolate(localFrame));
     v8::Local<v8::Context> context = mainFrame->mainWorldScriptContext();
     v8::Context::Scope contextScope(context);
+
+    wke::AutoAllowRecordJsExceptionInfo autoAllowRecordJsExceptionInfo;
     v8::Local<v8::Value> result = mainFrame->executeScriptAndReturnValue(code);
     return v8ValueToJsValue(context, result);
 }
@@ -920,6 +956,15 @@ jsExecState CWebView::globalExec()
     v8::HandleScope handleScope(isolate);
 
     return wke::createTempExecStateByV8Context(m_webPage->mainFrame()->mainWorldScriptContext());
+}
+
+jsExecState CWebView::globalExecByFrame(wkeWebFrameHandle frameId)
+{
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    v8::HandleScope handleScope(isolate);
+
+    blink::WebFrame* webFrame = m_webPage->getWebFrameFromFrameId(wkeWebFrameHandleToFrameId(m_webPage, frameId));
+    return wke::createTempExecStateByV8Context(webFrame->mainWorldScriptContext());
 }
 
 void CWebView::sleep()
@@ -998,6 +1043,12 @@ void CWebView::onPaintUpdated(wkePaintUpdatedCallback callback, void* callbackPa
 {
     m_webPage->wkeHandler().paintUpdatedCallback = callback;
     m_webPage->wkeHandler().paintUpdatedCallbackParam = callbackParam;
+}
+
+void CWebView::onPaintBitUpdated(wkePaintBitUpdatedCallback callback, void* callbackParam)
+{
+    m_webPage->wkeHandler().paintBitUpdatedCallback = callback;
+    m_webPage->wkeHandler().paintBitUpdatedCallbackParam = callbackParam;
 }
 
 void CWebView::onAlertBox(wkeAlertBoxCallback callback, void* callbackParam)
@@ -1192,10 +1243,22 @@ void CWebView::onWillReleaseScriptContext(wkeWillReleaseScriptContextCallback ca
     m_webPage->wkeHandler().willReleaseScriptContextCallbackParam = callbackParam;
 }
 
+void CWebView::onOtherLoad(wkeOnOtherLoadCallback callback, void* callbackParam)
+{
+    m_webPage->wkeHandler().otherLoadCallback = callback;
+    m_webPage->wkeHandler().otherLoadCallbackParam = callbackParam;
+}
+
 void CWebView::onDraggableRegionsChanged(wkeDraggableRegionsChangedCallback callback, void* callbackParam)
 {
     m_webPage->wkeHandler().draggableRegionsChangedCallback = callback;
     m_webPage->wkeHandler().draggableRegionsChangedCallbackParam = callbackParam;
+}
+
+void CWebView::onStartDragging(wkeStartDraggingCallback callback, void* callbackParam)
+{
+    m_webPage->wkeHandler().startDraggingCallback = callback;
+    m_webPage->wkeHandler().startDraggingCallbackParam = callbackParam;
 }
 
 void CWebView::setClientHandler(const wkeClientHandler* handler)
@@ -1268,7 +1331,7 @@ void CWebView::setNetInterface(const char* netInterface)
     m_netInterface = netInterface;
 }
 
-void CWebView::setProxyInfo(const String& host,	unsigned long port,	net::WebURLLoaderManager::ProxyType type, const String& username, const String& password)
+void CWebView::setProxyInfo(const String& host,	unsigned long port,	net::ProxyType type, const String& username, const String& password)
 {
     m_proxyType = type;
 
@@ -1285,10 +1348,12 @@ void CWebView::setProxyInfo(const String& host,	unsigned long port,	net::WebURLL
 
 class ShowDevToolsTaskObserver : public blink::WebThread::TaskObserver {
 public:
-    ShowDevToolsTaskObserver(CWebView* parent, const String& url)
+    ShowDevToolsTaskObserver(CWebView* parent, const std::string& url, wkeOnShowDevtoolsCallback callback, void* param)
     {
         m_parent = parent;
         m_url = url;
+        m_callback = callback;
+        m_param = param;
     }
     virtual ~ShowDevToolsTaskObserver() {}
 
@@ -1300,30 +1365,41 @@ public:
 
     virtual void willProcessTask() override
     {
+        
+    }
+    virtual void didProcessTask() override
+    {
+        OutputDebugStringA("Devtools willProcessTask\n");
+
         wkeWebView devToolsWebView = wkeCreateWebWindow(WKE_WINDOW_TYPE_POPUP, nullptr, 200, 200, 800, 600);
         m_parent->m_devToolsWebView = devToolsWebView;
 
         content::WebPage::connetDevTools(devToolsWebView->webPage(), m_parent->webPage());
 
-        wkeLoadURL(devToolsWebView, m_url.utf8().data());
+        wkeLoadURL(devToolsWebView, m_url.c_str());
         wkeShowWindow(devToolsWebView, TRUE);
         wkeOnWindowDestroy(devToolsWebView, handleDevToolsWebViewDestroy, m_parent);
         wkeSetWindowTitle(devToolsWebView, "Miniblink Devtools");
+        wkeSetZoomFactor(devToolsWebView, m_parent->zoomFactor());
         blink::Platform::current()->currentThread()->removeTaskObserver(this);
+
+        if (m_callback)
+            m_callback(devToolsWebView, m_param);
     }
-    virtual void didProcessTask() {}
 
 private:
     CWebView* m_parent;
-    String m_url;
+    std::string m_url;
+    wkeOnShowDevtoolsCallback m_callback;
+    void* m_param;
 };
 
-void CWebView::showDevTools(const utf8* url)
+void CWebView::showDevTools(const utf8* url, wkeOnShowDevtoolsCallback callback, void* param)
 {
     if (m_isCreatedDevTools)
         return;
     m_isCreatedDevTools = true;
-    blink::Platform::current()->currentThread()->addTaskObserver(new ShowDevToolsTaskObserver(this, url));
+    blink::Platform::current()->currentThread()->addTaskObserver(new ShowDevToolsTaskObserver(this, url, callback, param));
 }
 
 } // namespace wke
@@ -1333,6 +1409,8 @@ void CWebView::showDevTools(const utf8* url)
 wkeWebView wkeCreateWebView()
 {
     wke::CWebView* webView = new wke::CWebView();
+    webView->webPage()->setNeedAutoDrawToHwnd(false);
+
     //s_webViews.append(webView);
     return webView;
 }

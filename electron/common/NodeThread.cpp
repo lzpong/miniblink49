@@ -1,6 +1,6 @@
 ﻿#include "NodeThread.h"
 
-#include "nodeblink.h"
+#include "node/nodeblink.h"
 #include "gin/v8_initializer.h"
 #include "libplatform/libplatform.h"
 #include "base/thread.h"
@@ -100,7 +100,9 @@ static void workerRun(NodeArgc* nodeArgc) {
     if (err != 0)
         goto loop_init_failed;
 
-    ::CoInitialize(NULL);
+    uv_default_loop();
+
+    ::OleInitialize(nullptr);
 
     // Interruption signal handler
     err = uv_async_init(nodeArgc->childLoop, &nodeArgc->async, childSignalCallback);
@@ -170,7 +172,7 @@ node::Environment* nodeGetEnvironment(NodeArgc* nodeArgc) {
 
 } // atom
 
-#include "node/include/debug-agent.h"
+#include "node/src/debug-agent.h"
 
 namespace node {
 namespace debugger {

@@ -1,7 +1,7 @@
 #include "common/NodeBinding.h"
 
 #include "uv.h"
-#include "nodeblink.h"
+#include "node/nodeblink.h"
 #include "gin/dictionary.h"
 #include "base/file_path.h"
 #include "common/StringUtil.h"
@@ -114,7 +114,7 @@ std::wstring getResourcesPath(const std::wstring& name) {
     std::wstring temp(out);
     temp += L"\\node.exp";
     if (!::PathFileExists(temp.c_str()))
-        out += L"\\resources\\electron.asar\\";
+        out += L"\\resources\\miniblink.asar\\";
     else
         out += L"\\..\\..\\electron\\lib\\";
     
@@ -276,6 +276,25 @@ node::Environment* NodeBindings::createEnvironment(v8::Local<v8::Context> contex
     std::wstring scriptPath = resourcesPath // .append(FILE_PATH_LITERAL("electron.asar"))
         .append(processType)
         .append(FILE_PATH_LITERAL("\\init.js"));
+
+    // electron里的process.resourcesPath指的是xxx/resources目录。而main.js一般在xxx/resources/app下
+    if (args.size() > 1) {
+        resourcesPath = StringUtil::MultiByteToUTF16(CP_ACP, args[1]);
+        const wchar_t* resourcesPos = wcsstr(resourcesPath.c_str(), L"resources");
+        if (!resourcesPos) {
+            std::vector<wchar_t> wbuf(resourcesPath.size() + 1);
+            memset(&wbuf[0], 0, 2 * (resourcesPath.size() + 1));
+            wcsncpy(&wbuf[0], resourcesPath.c_str(), resourcesPath.size());
+            ::PathRemoveFileSpecW(&wbuf[0]);
+            resourcesPath = &wbuf[0];
+        } else {
+            resourcesPath = std::wstring(resourcesPath.c_str(), resourcesPos - resourcesPath.c_str() + 9);
+        }
+    }
+
+    if (scriptPath.length() > 0 && scriptPath[0] >= L'a' && scriptPath[0] <= L'z')
+        scriptPath[0] += L'A' - L'a';
+
     std::string scriptPathStr = StringUtil::UTF16ToUTF8(scriptPath);
     args.insert(args.begin() + 1, scriptPathStr.c_str());
 
@@ -286,11 +305,11 @@ node::Environment* NodeBindings::createEnvironment(v8::Local<v8::Context> contex
 
 //     const char* argv1[] = { "electron.exe", "E:\\mycode\\miniblink49\\trunk\\electron\\lib\\init.js" };
 //     node::Environment* env = node::CreateEnvironment(context->GetIsolate(), m_uvLoop, context, 2, argv1, 2, argv1);
+//     node::Environment* env = node::CreateEnvironment(context->GetIsolate(), m_uvLoop, context, 2, argv1, 2, argv1);
 
     // Node turns off AutorunMicrotasks, but we need it in web pages to match the
     // behavior of Chrome.
 //     if (!m_isBrowser)
-//         context->GetIsolate()->SetAutorunMicrotasks(true);
 
     gin::Dictionary process(context->GetIsolate(), m_env->process_object());
     process.Set("type", StringUtil::UTF16ToUTF8(processType));

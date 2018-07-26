@@ -54,8 +54,6 @@ static void clearLayerActions(WTF::Vector<cc::LayerChangeAction*>* actions);
 DEFINE_DEBUG_ONLY_GLOBAL(WTF::RefCountedLeakCounter, webLayerImplCounter, ("ccWebLayerImpl"));
 #endif
 
-int debugMaskLayerId = -1;
-
 WebLayerImpl::WebLayerImpl(WebLayerImplClient* client)
     : m_client(client)
     , m_layerType(client->type())
@@ -103,6 +101,8 @@ WebLayerImpl::WebLayerImpl(WebLayerImplClient* client)
 {
     m_id = atomicIncrement(&g_next_layer_id);
     m_webLayerClient = nullptr;
+
+    m_updateRectInRootLayerCoordinate.setEmpty();
 
     appendLayerChangeAction(new cc::LayerChangeActionCreate(-1, id(), m_layerType));
 
@@ -265,7 +265,7 @@ void WebLayerImpl::updataAndPaintContents(blink::WebCanvas* canvas, const blink:
     if (m_client)
         m_client->updataAndPaintContents(canvas, clip);
     m_dirty = false;
-    m_updateRectInRootLayerCoordinate = blink::IntRect();
+    m_updateRectInRootLayerCoordinate.setEmpty();
 }
 
 cc::DrawProperties* WebLayerImpl::drawProperties()
@@ -347,7 +347,7 @@ void WebLayerImpl::recordDraw(cc::RasterTaskGroup* taskGroup)
 
     if (!m_updateRectInRootLayerCoordinate.isEmpty()) {
         taskGroup->appendPendingInvalidateRect(m_updateRectInRootLayerCoordinate);
-        m_updateRectInRootLayerCoordinate = blink::IntRect();
+        m_updateRectInRootLayerCoordinate.setEmpty();
     }
 
     if (m_dirty)  // 必须把子节点也加入dirty，因为父节点变了的话，子节点的combined_transform也会变
@@ -360,7 +360,7 @@ void WebLayerImpl::drawToCanvas(blink::WebCanvas* canvas, const blink::IntRect& 
     if (m_client)
         m_client->drawToCanvas(canvas, clip);
     m_dirty = false;
-    m_updateRectInRootLayerCoordinate = blink::IntRect();
+    m_updateRectInRootLayerCoordinate.setEmpty();
 }
 
 int WebLayerImpl::id() const 
@@ -678,8 +678,6 @@ void WebLayerImpl::setMaskLayer(WebLayer* maskLayer)
     m_maskLayer->m_isMaskLayer = true;
     m_maskLayer->setParent(this);
     setNeedsCommit(true);
-
-    debugMaskLayerId = m_id;
 
     // for debug
     WebLayerImpl* parentLayer = m_parent;

@@ -1,8 +1,9 @@
-﻿#include <node_buffer.h>
+﻿
 #include "browser/api/ApiWebContents.h"
 #include "browser/api/WindowList.h"
 #include "browser/api/ApiApp.h"
 #include "browser/api/WindowInterface.h"
+#include "browser/api/ProtocolInterface.h"
 #include "browser/api/MenuEventNotif.h"
 #include "common/OptionsSwitches.h"
 #include "common/NodeRegisterHelp.h"
@@ -11,17 +12,21 @@
 #include "common/api/EventEmitter.h"
 #include "common/IdLiveDetect.h"
 #include "common/WinUserMsg.h"
+#include "common/DragAction.h"
 #include "common/asar/AsarUtil.h"
+#include "renderer/WebviewPlugin.h"
 #include "wke.h"
 #include "gin/per_isolate_data.h"
 #include "gin/object_template_builder.h"
 #include "base/files/file_path.h"
+#include "base/win/windows_version.h"
+#include "Resource.h"
 #include <shellapi.h>
 #include <ole2.h>
 
 namespace atom {
 
-static const wchar_t kElectronClassName[] = L"mb_electron_window";
+const wchar_t WindowInterface::kElectronClassName[] = L"mb_electron_window";
 
 class Window : public mate::EventEmitter<Window>, public WindowInterface {
 public:
@@ -30,6 +35,7 @@ public:
         m_webContents = nullptr;
         m_state = WindowUninited;
         m_hWnd = nullptr;
+        m_hIMC = nullptr;
         m_cursorInfoType = 0;
         m_isCursorInfoTypeAsynGetting = false;
         m_memoryBMP = nullptr;
@@ -44,14 +50,19 @@ public:
         m_memoryBmpSize.cx = 0;
         m_memoryBmpSize.cy = 0;
         ::InitializeCriticalSection(&m_memoryCanvasLock);
+        ::InitializeCriticalSection(&m_mouseMsgQueueLock);
 
         m_draggableRegion = ::CreateRectRgn(0, 0, 0, 0);
+        m_dragAction = nullptr;
         
-        m_id = IdLiveDetect::get()->constructed();
+        m_id = IdLiveDetect::get()->constructed(this);
     }
 
     ~Window() {
-        DebugBreak();
+        char* output = (char*)malloc(0x100);
+        sprintf(output, "~Window %p\n", this);
+        OutputDebugStringA(output);
+        free(output);
 
         delete m_createWindowParam;
 
@@ -64,7 +75,7 @@ public:
 
         //ThreadCall::callUiThreadSync([this] {
             //delete data->m_webContents;
-            ::SendMessage(this->m_hWnd, WM_CLOSE, 0, 0);
+            //::SendMessage(this->m_hWnd, WM_CLOSE, 0, 0);
         //});
         //WindowList::getInstance()->removeWindow(this);
 
@@ -192,6 +203,9 @@ public:
         builder.SetMethod("setThumbnailToolTip", &Window::setThumbnailToolTipApi);
         builder.SetMethod("setAppDetails", &Window::setAppDetailsApi);
         builder.SetMethod("setIcon", &Window::setIconApi);
+        builder.SetMethod("setProgressBar", &Window::setProgressBarApi);
+        builder.SetMethod("isDestroyed", &Window::isDestroyedApi);
+        
         builder.SetProperty("id", &Window::getIdApi);
 
         //NODE_SET_PROTOTYPE_METHOD(prototype, &Window::"id", &Window::nullFunction);
@@ -201,10 +215,9 @@ public:
         browserWindowClass.SetMethod("getFocusedWindow", &Window::getFocusedWindowApi);
         browserWindowClass.SetMethod("fromId", &Window::fromIdApi);
         browserWindowClass.SetMethod("getAllWindows", &Window::getAllWindowsApi);
-
-        // 设置constructor
+        browserWindowClass.SetMethod("fromWebContents", &Window::fromWebContentsApi);
+        
         constructor.Reset(isolate, prototype->GetFunction());
-        // export `BrowserWindow`
         target->Set(v8::String::NewFromUtf8(isolate, "BrowserWindow"), prototype->GetFunction());
     }
 
@@ -214,7 +227,7 @@ public:
     }
 
     virtual void close() override {
-        ::DestroyWindow(m_hWnd);
+        ::DestroyWindow(m_hWnd); // go to WM_NCDESTROY
     }
 
     virtual v8::Local<v8::Object> getWrapper() override {
@@ -250,8 +263,9 @@ public:
         if (0 == sizeDest.cx * sizeDest.cy)
             return;
             
+        HDC hSreenDC = ::GetWindowDC(hWnd);
         if (!m_memoryDC)
-            m_memoryDC = ::CreateCompatibleDC(nullptr);
+            m_memoryDC = ::CreateCompatibleDC(hSreenDC);
 
         if (!m_memoryBMP || !isRectEqual(m_clientRect, rectDest)) {
             m_clientRect = rectDest;
@@ -259,38 +273,90 @@ public:
 
             if (m_memoryBMP)
                 ::DeleteObject((HGDIOBJ)m_memoryBMP);
-            m_memoryBMP = ::CreateCompatibleBitmap(hdc, sizeDest.cx, sizeDest.cy);
+            m_memoryBMP = ::CreateCompatibleBitmap(hSreenDC, sizeDest.cx, sizeDest.cy);
         }
+        ::ReleaseDC(hWnd, hSreenDC);
 
+        DWORD flag = SRCCOPY;
+        if (m_createWindowParam->transparent)
+            flag |= CAPTUREBLT;
+
+        BOOL b = FALSE;
         HBITMAP hbmpOld = (HBITMAP)::SelectObject(m_memoryDC, m_memoryBMP);
-        ::BitBlt(m_memoryDC, x, y, cx, cy, hdc, x, y, SRCCOPY);
-        ::SelectObject(m_memoryDC, (HGDIOBJ)hbmpOld);
+        //if (!m_createWindowParam->transparent) {
+            ::BitBlt(m_memoryDC, x, y, cx, cy, hdc, x, y, flag);
+//         } else {
+//             int copy_width = cx;
+//             int copy_height = cy;
+//             BLENDFUNCTION blendFunction = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+//             b = ::GdiAlphaBlend(m_memoryDC, x, y, copy_width, copy_height, hdc, x, y, copy_width, copy_height, blendFunction);
+//         }
+    }
+
+    bool drawToNativeLayeredContext(HDC dc, HDC source_dc, const RECT* srcRect, const RECT* clientRect) {
+        BOOL b = FALSE;
+
+        int clientWidth = clientRect->right - clientRect->left;
+        int clientHeight = clientRect->bottom - clientRect->top;
+
+        BLENDFUNCTION blendFunction = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        typedef BOOL(WINAPI* PFN_UpdateLayeredWindow) (HWND hWnd, HDC hdcDst, POINT *pptDst, SIZE *psize, HDC hdcSrc, POINT *pptSrc, COLORREF crKey, BLENDFUNCTION *pblend, DWORD dwFlags);
+        static PFN_UpdateLayeredWindow s_pUpdateLayeredWindow = NULL;
+        if (NULL == s_pUpdateLayeredWindow)
+            s_pUpdateLayeredWindow = reinterpret_cast<PFN_UpdateLayeredWindow>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "UpdateLayeredWindow"));
+
+        SIZE clientSize = { clientWidth, clientHeight };
+        POINT zero = { 0 };
+
+        typedef BOOL(WINAPI* PFN_UpdateLayeredWindowIndirect) (HWND hWnd, UPDATELAYEREDWINDOWINFO const* pULWInfo);
+        static PFN_UpdateLayeredWindowIndirect s_pUpdateLayeredWindowIndirect = NULL;
+        if (NULL == s_pUpdateLayeredWindowIndirect)
+            s_pUpdateLayeredWindowIndirect = reinterpret_cast<PFN_UpdateLayeredWindowIndirect>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "UpdateLayeredWindowIndirect"));
+
+        if (0 && s_pUpdateLayeredWindowIndirect) {
+            UPDATELAYEREDWINDOWINFO info = { sizeof(UPDATELAYEREDWINDOWINFO), dc, nullptr, &clientSize, source_dc, nullptr, RGB(0xFF, 0xFF, 0xFF), &blendFunction, ULW_ALPHA, srcRect };
+            b = s_pUpdateLayeredWindowIndirect(m_hWnd, &info);
+        } else {
+            b = s_pUpdateLayeredWindow(m_hWnd, dc, nullptr, &clientSize, source_dc, &zero, RGB(0xFF, 0xFF, 0xFF), &blendFunction, ULW_ALPHA);
+        }
+        return !!b;
     }
 
     void onPaintUpdatedInUiThread(int x, int y, int cx, int cy) {
         ::EnterCriticalSection(&m_memoryCanvasLock);
 
         HDC hdcScreen = ::GetDC(m_hWnd);
-        ::BitBlt(hdcScreen, x, y, cx, cy, m_memoryDC, x, y, SRCCOPY);
+        DWORD flag = SRCCOPY;
+        BOOL b = FALSE;
+        if (m_createWindowParam->transparent) {
+            RECT srcRect = { x, y, cx, cy };
+            RECT clientRect;
+            ::GetClientRect(m_hWnd, &clientRect);
+
+            drawToNativeLayeredContext(hdcScreen, m_memoryDC, &srcRect, &clientRect);
+
+            ::ReleaseDC(m_hWnd, hdcScreen);
+        } else
+            b = ::BitBlt(hdcScreen, x, y, cx, cy, m_memoryDC, x, y, flag);
         ::ReleaseDC(m_hWnd, hdcScreen);
 
         ::LeaveCriticalSection(&m_memoryCanvasLock);
     }
 
-    static void staticOnPaintUpdatedInCompositeThread(wkeWebView webView, Window* win, const HDC hdc, int x, int y, int cx, int cy) {
-        ::EnterCriticalSection(&win->m_memoryCanvasLock);
-        win->onPaintUpdatedInCompositeThread(hdc, x, y, cx, cy);
-        ::LeaveCriticalSection(&win->m_memoryCanvasLock);
+    static void staticOnPaintUpdatedInCompositeThread(wkeWebView webView, Window* self, const HDC hdc, int x, int y, int cx, int cy) {
+        ::EnterCriticalSection(&self->m_memoryCanvasLock);
+        self->onPaintUpdatedInCompositeThread(hdc, x, y, cx, cy);
+        ::LeaveCriticalSection(&self->m_memoryCanvasLock);
 
-        if (win->m_createWindowParam->transparent) {
-            int id = win->m_id;
-            ThreadCall::callUiThreadAsync([id, win, x, y, cx, cy] {
+        if (self->m_createWindowParam->transparent) {
+            int id = self->m_id;
+            ThreadCall::callUiThreadAsync([id, self, x, y, cx, cy] {
                 if (IdLiveDetect::get()->isLive(id))
-                    win->onPaintUpdatedInUiThread(x, y, cx, cy);
+                    self->onPaintUpdatedInUiThread(x, y, cx, cy);
             });
         } else {
             RECT rc = { x, y, x + cx, y + cy };
-            ::InvalidateRect(win->m_hWnd, &rc, false);
+            ::InvalidateRect(self->m_hWnd, &rc, false);
         }
     }
 
@@ -331,7 +397,7 @@ public:
         ::EndPaint(hWnd, &ps);
     }
 
-    bool doDraggableRegionNcHitTest(HWND hWnd) {
+    bool isDraggableRegionNcHitTest(HWND hWnd) {
         bool handle = false;
         if (!m_draggableRegion)
             return handle;
@@ -340,20 +406,57 @@ public:
         ::GetCursorPos(&pos);
         ::ScreenToClient(hWnd, &pos);
 
-        handle = ::PtInRegion(m_draggableRegion, pos.x, pos.y);
-        if (handle)
+        handle = !!::PtInRegion(m_draggableRegion, pos.x, pos.y);
+        return handle;
+    }
+
+    bool doDraggableRegionNcHitTest(HWND hWnd) {
+        bool handle = isDraggableRegionNcHitTest(hWnd);
+        if (handle && !m_createWindowParam->isFrame)
             ::PostMessage(hWnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
         return handle;
+    }
+
+    void delayDoMouseMsg(wkeWebView webview) {
+        ::EnterCriticalSection(&m_mouseMsgQueueLock);
+        if (0 == m_mouseMsgQueue.size()) {
+            ::LeaveCriticalSection(&m_mouseMsgQueueLock);
+            return;
+        }
+
+        std::list<MouseMsg*> mouseMsgQueue;
+        bool hasMouseMove = false; 
+        MouseMsg* mouseMsg = nullptr;
+        std::list<MouseMsg*>::reverse_iterator it = m_mouseMsgQueue.rbegin();
+        for (; it != m_mouseMsgQueue.rend(); ++it) {
+            mouseMsg = *it;
+            if (WM_MOUSEMOVE != (*it)->message) {
+                mouseMsgQueue.push_back(new MouseMsg(mouseMsg->message, mouseMsg->x, mouseMsg->y, mouseMsg->flags));
+            } else if (!hasMouseMove) {
+                hasMouseMove = true;
+                mouseMsgQueue.push_back(new MouseMsg(mouseMsg->message, mouseMsg->x, mouseMsg->y, mouseMsg->flags));
+            }
+            delete mouseMsg;
+        }
+        m_mouseMsgQueue.clear();
+        ::LeaveCriticalSection(&m_mouseMsgQueueLock);
+
+        for (it = mouseMsgQueue.rbegin(); it != mouseMsgQueue.rend(); ++it) {
+            mouseMsg = *it;
+            wkeFireMouseEvent(webview, mouseMsg->message, mouseMsg->x, mouseMsg->y, mouseMsg->flags);
+            delete mouseMsg;
+        }
     }
 
     void onMouseMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
         int id = m_id;
         wkeWebView webview = m_webContents->getWkeView();
         if (message == WM_LBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_RBUTTONDOWN) {
-            ::SetFocus(hWnd);
-            //::SetCapture(hWnd);
-        }
-        else if (message == WM_LBUTTONUP || message == WM_MBUTTONUP || message == WM_RBUTTONUP) {
+            if (!doDraggableRegionNcHitTest(hWnd)) {
+                ::SetFocus(hWnd);
+                ::SetCapture(hWnd);
+            }
+        } else if (message == WM_LBUTTONUP || message == WM_MBUTTONUP || message == WM_RBUTTONUP) {
             ::ReleaseCapture();
         }
 
@@ -374,9 +477,16 @@ public:
         if (wParam & MK_RBUTTON)
             flags |= WKE_RBUTTON;
 
-        ThreadCall::callBlinkThreadAsync([id, webview, message, x, y, flags] {
-            if (IdLiveDetect::get()->isLive(id))
-                wkeFireMouseEvent(webview, message, x, y, flags);
+        ::EnterCriticalSection(&m_mouseMsgQueueLock);
+        //MouseMsg mouseMsg(message, x, y, flags);
+        m_mouseMsgQueue.push_back(new MouseMsg(message, x, y, flags));
+        ::LeaveCriticalSection(&m_mouseMsgQueueLock);
+
+        Window* self = this;
+        ThreadCall::callBlinkThreadAsync([self, id, webview] {
+            if (!IdLiveDetect::get()->isLive(id))
+                return;
+            self->delayDoMouseMsg(webview);
         });
         if (WM_LBUTTONDOWN == message)
             doDraggableRegionNcHitTest(hWnd);
@@ -389,16 +499,16 @@ public:
 
         int id = m_id;
         wkeWebView webview = m_webContents->getWkeView();
-        Window* win = this;
-        ThreadCall::callBlinkThreadAsync([webview, win, id] {
+        Window* self = this;
+        ThreadCall::callBlinkThreadAsync([webview, self, id] {
             if (!IdLiveDetect::get()->isLive(id))
                 return;
-            win->m_isCursorInfoTypeAsynGetting = false;
+            self->m_isCursorInfoTypeAsynGetting = false;
             int cursorType = wkeGetCursorInfoType(webview);
-            if (cursorType == win->m_cursorInfoType)
+            if (cursorType == self->m_cursorInfoType)
                 return;
-            win->m_cursorInfoType = cursorType;
-            ::PostMessage(win->m_hWnd, WM_SETCURSOR/*_ASYN*/, 0, 0);
+            self->m_cursorInfoType = cursorType;
+            ::PostMessage(self->m_hWnd, WM_SETCURSOR/*_ASYN*/, 0, 0);
         });
     }
 
@@ -486,15 +596,15 @@ public:
 
         ::DragFinish(hDrop);
 
-        POINT* curPos = new POINT();
-        ::GetCursorPos(curPos);
-
         POINT* screenPos = new POINT();
-        screenPos->x = curPos->x;
-        screenPos->y = curPos->y;
-        ::ScreenToClient(m_hWnd, screenPos);
+        ::GetCursorPos(screenPos);
 
-        ThreadCall::callBlinkThreadAsync([webContents, id, fileNames, curPos, screenPos] {
+        POINT* clientPos = new POINT();
+        clientPos->x = screenPos->x;
+        clientPos->y = screenPos->y;
+        ::ScreenToClient(m_hWnd, clientPos);
+
+        ThreadCall::callBlinkThreadAsync([webContents, id, fileNames, clientPos, screenPos] {
             if (!IdLiveDetect::get()->isLive(id))
                 return;
 
@@ -502,9 +612,9 @@ public:
             for (size_t i = 0; i < fileNames->size(); ++i) {
                 files.push_back(wkeCreateStringW(&(fileNames->at(i)->at(0)), fileNames->at(i)->size()));
             }
-            wkeSetDragFiles(webContents->getWkeView(), curPos, screenPos, &files[0], files.size());
+            wkeSetDragFiles(webContents->getWkeView(), clientPos, screenPos, &files[0], files.size());
             
-            delete curPos;
+            delete clientPos;
             delete screenPos;
             for (size_t i = 0; i < fileNames->size(); ++i) {
                 wkeDeleteString(files.at(i));
@@ -518,6 +628,7 @@ public:
         wkeWebView webview = m_webContents->getWkeView();
         Window* self = this;
         int id = m_id;
+
         switch (message) {
         case WM_CLOSE: {
             m_state = WindowDestroying;
@@ -546,7 +657,15 @@ public:
             
             m_state = WindowDestroyed;
             m_webContents = nullptr;
-            //delete m_webContents;
+
+            {
+                char* output = (char*)malloc(0x100);
+                sprintf(output, "WM_NCDESTROY %p %d\n", this, m_id);
+                OutputDebugStringA(output);
+                free(output);
+            }
+
+            IdLiveDetect::get()->deconstructed(m_id);
             break;
 
         case WM_TIMER:
@@ -578,7 +697,7 @@ public:
             mate::EventEmitter<Window>::emit("move");
             break;
 
-        case WM_SIZE:
+        case WM_SIZE: {
             ThreadCall::callBlinkThreadAsync([webview, lParam] {
                 wkeResize(webview, LOWORD(lParam), HIWORD(lParam));
                 wkeRepaintIfNeeded(webview);
@@ -599,8 +718,16 @@ public:
                 m_isMaximized = false;
             }
 
+            setRoundWindow();
+        }
             return 0;
         case WM_KEYDOWN: {
+
+            if (m_hIMC) {
+                ::ImmAssociateContext(hWnd, m_hIMC);
+                m_hIMC = nullptr;
+            }
+            
             unsigned int virtualKeyCode = wParam;
             unsigned int flags = 0;
             if (HIWORD(lParam) & KF_REPEAT)
@@ -610,6 +737,10 @@ public:
 
             ThreadCall::callBlinkThreadAsync([webview, virtualKeyCode, flags] {
                 wkeFireKeyDownEvent(webview, virtualKeyCode, flags, false);
+
+                if (113 == virtualKeyCode) {
+                    wkeSetDebugConfig(webview, "showDevTools", "E:/mycode/miniblink49/trunk/third_party/WebKit/Source/devtools/front_end/inspector.html");
+                }
             });
 
             return 0;
@@ -742,7 +873,7 @@ public:
                 ::PostMessage(hWnd, WM_IME_STARTCOMPOSITION_ASYN, (WPARAM)caret, 0);
             });
         }
-        return 0;
+            return 0;
         case WM_IME_STARTCOMPOSITION_ASYN: {
             wkeRect* caret = (wkeRect*)wParam;
             COMPOSITIONFORM compositionForm;
@@ -750,15 +881,21 @@ public:
             compositionForm.ptCurrentPos.x = caret->x;
             compositionForm.ptCurrentPos.y = caret->y;
 
-            delete caret;
-
             HIMC hIMC = ::ImmGetContext(hWnd);
+
+            if (0 == caret->h) {
+                ::ImmAssociateContext(hWnd, nullptr);
+                m_hIMC = hIMC;
+            }
+
             ::ImmSetCompositionWindow(hIMC, &compositionForm);
             ::ImmReleaseContext(hWnd, hIMC);
+
+            delete caret;
         }
         break;
         case WM_DROPFILES:
-            onDragFiles((HDROP)wParam);
+            //onDragFiles((HDROP)wParam);
             break;
         }
 
@@ -767,41 +904,36 @@ public:
 
     static LRESULT CALLBACK staticWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
         int id = -1;
-        Window* win = (Window *)::GetPropW(hWnd, kPrppW);
-        if (!win) {
-            if (message == WM_CREATE) {
-                LPCREATESTRUCTW cs = (LPCREATESTRUCTW)lParam;
-                Window *win = (Window *)cs->lpCreateParams;
-                id = win->m_id;
-                ThreadCall::callBlinkThreadAsync([win, hWnd, id] {
-                    if (IdLiveDetect::get()->isLive(id))
-                        wkeSetHandle(win->m_webContents->getWkeView(), hWnd);
-                });
-                
-                ::SetPropW(hWnd, kPrppW, (HANDLE)win);
-                ::SetTimer(hWnd, (UINT_PTR)win, 70, NULL);
-                return 0;
-            }
+        Window* self = (Window*)::GetPropW(hWnd, kPrppW);
+        if (!self && message == WM_CREATE) {
+            
+            LPCREATESTRUCTW cs = (LPCREATESTRUCTW)lParam;
+            self = (Window *)cs->lpCreateParams;
+            id = self->m_id;
+            ::SetPropW(hWnd, kPrppW, (HANDLE)self);
+            ::SetTimer(hWnd, (UINT_PTR)self, 70, NULL);
+            return 0;
+            
         }
-        if (!win)
+        if (!self)
             return ::DefWindowProcW(hWnd, message, wParam, lParam);
 
-        id = win->m_id;
-        wkeWebView webview = win->m_webContents->getWkeView();
+        id = self->m_id;
+        wkeWebView webview = self->m_webContents->getWkeView();
         if (!webview)
             return ::DefWindowProcW(hWnd, message, wParam, lParam);
 
-        return win->windowProc(hWnd, message, wParam, lParam);
+        return self->windowProc(hWnd, message, wParam, lParam);
     }
 
-    static v8::Local<v8::Value> toBuffer(v8::Isolate* isolate, void* val, int size) {
-        auto buffer = node::Buffer::Copy(isolate, static_cast<char*>(val), size);
-        if (buffer.IsEmpty()) {
-            return v8::Null(isolate);
-        } else {
-            return buffer.ToLocalChecked();
-        }
-    }
+//     static v8::Local<v8::Value> toBuffer(v8::Isolate* isolate, void* val, int size) {
+//         auto buffer = node::Buffer::Copy(isolate, static_cast<char*>(val), size);
+//         if (buffer.IsEmpty()) {
+//             return v8::Null(isolate);
+//         } else {
+//             return buffer.ToLocalChecked();
+//         }
+//     }
 
 private:
     void closeApi() {
@@ -915,7 +1047,7 @@ private:
     }
 
     UINT_PTR getNativeWindowHandleApi() {
-        //args.GetReturnValue().Set(toBuffer(isolate, (void*)(&win->m_hWnd), sizeof(HWND)));
+        //args.GetReturnValue().Set(toBuffer(isolate, (void*)(&self->m_hWnd), sizeof(HWND)));
         return (UINT_PTR)m_hWnd;
     }
 
@@ -970,25 +1102,25 @@ private:
     }
 
     std::vector<int> getContentSizeApi() {
-        Window* win = this;
-        int width;
-        int height;
-        ThreadCall::callBlinkThreadSync([win, &width, &height] {
-            width = wkeGetContentWidth(win->m_webContents->getWkeView());
-            height = wkeGetContentHeight(win->m_webContents->getWkeView());
-        });
+        Window* self = this;
+        int width = 300;
+        int height = 450;
+//         ThreadCall::callBlinkThreadSync([self, &width, &height] {
+//             width = wkeGetContentWidth(self->m_webContents->getWkeView());
+//             height = wkeGetContentHeight(self->m_webContents->getWkeView());
+//         }); // weolar
         std::vector<int> size = { width, height };
         return size;
     }
 
     void setContentSizeApi(int width, int height) {
-        Window* win = this;
-        int id = win->m_id;
-        ThreadCall::callBlinkThreadAsync([win, id, width, height] {
+        Window* self = this;
+        int id = self->m_id;
+        ThreadCall::callBlinkThreadAsync([self, id, width, height] {
             if (!IdLiveDetect::get()->isLive(id))
                 return;
-            wkeResize(win->m_webContents->getWkeView(), width, height);
-            wkeRepaintIfNeeded(win->m_webContents->getWkeView());
+            wkeResize(self->m_webContents->getWkeView(), width, height);
+            wkeRepaintIfNeeded(self->m_webContents->getWkeView());
         });
     }
 
@@ -1104,9 +1236,9 @@ private:
     }
 
     void setDocumentEditedApi(bool b) {
-        Window* win = this;
-        ThreadCall::callBlinkThreadSync([win, b] {
-            wkeSetEditable(win->m_webContents->getWkeView(), b);
+        Window* self = this;
+        ThreadCall::callBlinkThreadSync([self, b] {
+            wkeSetEditable(self->m_webContents->getWkeView(), b);
         });
     }
 
@@ -1123,9 +1255,9 @@ private:
     }
 
     void focusOnWebViewApi() {
-        Window* win = this;
-        ThreadCall::callBlinkThreadSync([win] {
-            wkeSetFocus(win->m_webContents->getWkeView());
+        Window* self = this;
+        ThreadCall::callBlinkThreadSync([self] {
+            wkeSetFocus(self->m_webContents->getWkeView());
         });
     }
 
@@ -1183,6 +1315,14 @@ private:
     void setIconApi() {
     }
 
+    void setProgressBarApi(double progress) {
+
+    }
+
+    bool isDestroyedApi() const {
+        return false;
+    }
+
     static void getFocusedWindowApi(const v8::FunctionCallbackInfo<v8::Value>& info) {
         v8::Local<v8::Value> result = WindowInterface::getFocusedWindow(info.GetIsolate());
         info.GetReturnValue().Set(result);
@@ -1210,8 +1350,37 @@ private:
     }
 
     static void getAllWindowsApi(const v8::FunctionCallbackInfo<v8::Value>& info) {
-        OutputDebugStringA("getAllWindowsApi\n");
-        DebugBreak();
+        size_t size = WindowList::getInstance()->size();
+        v8::Local<v8::Array> result = v8::Array::New(info.GetIsolate(), size);
+        
+        for (size_t i = 0; i < size; ++i) {
+            Window* self = (Window*)WindowList::getInstance()->get(i);
+            result->Set(i, self->GetWrapper(info.GetIsolate()));
+        }
+
+        info.GetReturnValue().Set(result);
+    }
+    
+    static void fromWebContentsApi(const v8::FunctionCallbackInfo<v8::Value>& info) {
+        if (1 != info.Length())
+            return;
+        v8::Local<v8::Value> arg0 = info[0];
+        if (!arg0->IsObject())
+            return;
+
+        v8::Local<v8::Object> webContents = arg0->ToObject();
+
+        WrappableBase* webContentsPtr = GetNativePtr(webContents, &WebContents::kWrapperInfo);
+        if (!webContentsPtr)
+            return;
+
+        WebContents* contents = (WebContents*)webContentsPtr;
+        WindowInterface* win = contents->getOwner();
+        if (!win)
+            return;
+        Window* self = (Window*)win;
+        v8::Local<v8::Object> winObject = self->GetWrapperImpl(info.GetIsolate(), &Window::kWrapperInfo);
+        info.GetReturnValue().Set(winObject);
     }
 
     int getIdApi() const {
@@ -1231,7 +1400,48 @@ private:
         DebugBreak();
     }
 
+    static void readJsFile(const wchar_t* path, std::vector<char>* buffer) {
+        HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (INVALID_HANDLE_VALUE == hFile) {
+            DebugBreak();
+            return;
+        }
+
+        DWORD fileSizeHigh;
+        const DWORD bufferSize = ::GetFileSize(hFile, &fileSizeHigh);
+
+        DWORD numberOfBytesRead = 0;
+        buffer->resize(bufferSize);
+        BOOL b = ::ReadFile(hFile, &buffer->at(0), bufferSize, &numberOfBytesRead, nullptr);
+        ::CloseHandle(hFile);
+        b = b;
+    }
+
+    static bool hookUrl(void* job, const char* url, const char* hookUrl, const wchar_t* localFile, const char* mime) {
+        if (0 != strstr(url, hookUrl)) {
+            wkeNetSetMIMEType(job, (char*)mime);
+
+            std::vector<char> buffer;
+            readJsFile(localFile, &buffer);
+            wkeNetSetData(job, &buffer[0], buffer.size());
+
+            OutputDebugStringA("hookUrl:");
+            OutputDebugStringA(url);
+            OutputDebugStringA("\n");
+
+            return true;
+        }
+
+        return false;
+    }
+    
     static bool handleLoadUrlBegin(wkeWebView webView, void* param, const char* url, void* job) {
+//         if (hookUrl(job, url, "frameworks-4a55ab3fcf005abef1e8b859483f3cce.js", L"D:\\ProgramData\\Lepton\\resources\\frameworks-4a55ab3fcf005abef1e8b859483f3cce.js", "text/javascript"))
+//             return true;
+
+        if (ProtocolInterface::inst()->handleLoadUrlBegin(param, url, job))
+            return true;
+
         if (0 == strstr(url, "file:///") || 0 == strstr(url, ".asar"))
             return false;
 
@@ -1253,15 +1463,69 @@ private:
             return false;
         wkeNetSetData(job, &contents.at(0), contents.size());
 
-        OutputDebugStringA("HookUrl:");
+        OutputDebugStringA("apiwindow.load:");
         OutputDebugStringA(url);
         OutputDebugStringA("\n");
 
         return true;
     }
 
+    static std::string* catchCallstack(v8::Isolate* isolate) {
+        std::string* outString = new std::string();
+
+        const v8::StackTrace::StackTraceOptions options = static_cast<v8::StackTrace::StackTraceOptions>(
+            v8::StackTrace::kLineNumber
+            | v8::StackTrace::kColumnOffset
+            | v8::StackTrace::kScriptId
+            | v8::StackTrace::kScriptNameOrSourceURL
+            | v8::StackTrace::kFunctionName);
+
+        int stackNum = 50;
+        v8::HandleScope handleScope(isolate);
+        v8::Local<v8::StackTrace> stackTrace(v8::StackTrace::CurrentStackTrace(isolate, stackNum, options));
+        int count = stackTrace->GetFrameCount();
+
+        for (int i = 0; i < count; ++i) {
+            v8::Local<v8::StackFrame> stackFrame = stackTrace->GetFrame(i);
+            int frameCount = stackTrace->GetFrameCount();
+            int line = stackFrame->GetLineNumber();
+            v8::Local<v8::String> scriptName = stackFrame->GetScriptNameOrSourceURL();
+            v8::Local<v8::String> funcName = stackFrame->GetFunctionName();
+
+            std::string scriptNameWTF;
+            std::string funcNameWTF;
+
+            if (!scriptName.IsEmpty()) {
+                v8::String::Utf8Value scriptNameUtf8(scriptName);
+                scriptNameWTF = *scriptNameUtf8;
+            }
+
+            if (!funcName.IsEmpty()) {
+                v8::String::Utf8Value funcNameUtf8(funcName);
+                funcNameWTF = *funcNameUtf8;
+            }
+            std::vector<char> output;
+            output.resize(1000);
+            sprintf(&output[0], "line:%d, [", line);
+            *outString += (&output[0]);
+
+            if (!scriptNameWTF.empty()) {
+                *outString += (scriptNameWTF.c_str());
+            }
+            *outString += ("] , [");
+
+            if (!funcNameWTF.empty()) {
+                *outString += (funcNameWTF.c_str());
+            }
+            *outString += ("]\n");
+        }
+        *outString += ("\n");
+
+        return outString;
+    }
+
     static void onConsoleCallback(wkeWebView webView, void* param, wkeConsoleLevel level, const wkeString message, const wkeString sourceName, unsigned sourceLine, const wkeString stackTrace) {
-        //const utf8* msg = wkeToString(message);
+        const utf8* msg = wkeToString(message);
     }
 
     void moveToCenter() {
@@ -1287,6 +1551,18 @@ private:
 
     static const int kNotSetXYFlag = -8467;
 
+    void setRoundWindow() {
+        if (m_createWindowParam->isFrame)
+            return;
+
+        RECT windowRect;
+        ::GetWindowRect(m_hWnd, &windowRect);
+        int nWidthEllipse = 7;
+        int nHeightEllipse = 7;
+        HRGN hRgn = ::CreateRoundRectRgn(0, 0, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top, nWidthEllipse, nHeightEllipse);
+        ::SetWindowRgn(m_hWnd, hRgn, TRUE);
+    }
+
     static void onDocumentReadyInBlinkThread(wkeWebView webWindow, void* param) {
         int width = wkeGetContentWidth(webWindow);
         int height = wkeGetContentHeight(webWindow);
@@ -1302,6 +1578,10 @@ private:
             if (!IdLiveDetect::get()->isLive(id))
                 return;
 
+            self->m_dragAction = new DragAction(self->m_webContents->getWkeView(), self->m_hWnd, id);
+            HRESULT hr = ::RegisterDragDrop(self->m_hWnd, self->m_dragAction);
+            //::DragAcceptFiles(self->m_hWnd, true);
+
             RECT rect = { 0 };
             ::GetWindowRect(self->m_hWnd, &rect);
             if (rect.left == kNotSetXYFlag || rect.top == kNotSetXYFlag)
@@ -1309,21 +1589,102 @@ private:
 
             if (needSetPos)
                 ::SetWindowPos(self->m_hWnd, HWND_NOTOPMOST, 0, 0, width, height, SWP_NOMOVE | SWP_NOREPOSITION);
+
             self->mate::EventEmitter<Window>::emit("ready-to-show");
+
+            if (self->m_webContents) {
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("dom-ready");
+            }
         });
     }
 
     static void onTitleChangedInBlinkThread(wkeWebView webWindow, void* param, const wkeString title) {
         std::wstring* titleW = new std::wstring(wkeGetStringW(title));
+        std::string* titleA = new std::string(wkeGetString(title));
+
         Window* self = (Window*)param;
         int id = self->m_id;
-        ThreadCall::callUiThreadAsync([id, self, titleW] {
+        ThreadCall::callUiThreadAsync([id, self, titleW, titleA] {
             if (!IdLiveDetect::get()->isLive(id))
                 return;
 
+            self->getWebContents()->onTitleChange(*titleA);
             ::SetWindowText(self->m_hWnd, titleW->c_str());
             self->mate::EventEmitter<Window>::emit("page-title-updated");
             delete titleW;
+            delete titleA;
+        });
+    }
+
+    static void onURLChangedCallback(wkeWebView webView, void* param, wkeWebFrameHandle frameId, const wkeString url) {
+        Window* self = (Window*)param;
+        std::string* urlStr = new std::string(wkeGetString(url));
+        if (!wkeIsMainFrame(webView, frameId))
+            return;
+        int id = self->m_id;
+        ThreadCall::callUiThreadAsync([id, self, urlStr] {
+            if (!IdLiveDetect::get()->isLive(id))
+                return;
+
+            self->getWebContents()->onUrlChange(*urlStr);
+            delete urlStr;
+        });
+    }
+
+    static bool onNavigationCallback(wkeWebView webView, void* param, wkeNavigationType navigationType, const wkeString url) {
+        Window* self = (Window*)param; 
+        std::string* urlString = new std::string(wkeGetString(url));
+        int id = self->m_id;
+        bool allow = true;
+        ThreadCall::callUiThreadSync([id, self, urlString, &allow] {
+            if (!IdLiveDetect::get()->isLive(id))
+                return;
+
+            if (!self->m_webContents->m_isLoading)
+                allow = !(self->m_webContents->mate::EventEmitter<WebContents>::emit("will-navigate", *urlString));
+            self->m_webContents->m_isLoading = false;
+            delete urlString;
+        });
+        return allow;
+    }
+
+    static void onOtherLoadCallback(wkeWebView webView, void* param, wkeOtherLoadType type, wkeTempCallbackInfo* info) {
+        Window* self = (Window*)param;
+        int id = self->m_id;
+        WindowState state = self->m_state;
+        bool isDestroyApiBeCalled = self->m_isDestroyApiBeCalled;
+
+        wkeWillSendRequestInfo* willSendRequestInfo = info->willSendRequestInfo;
+        if (willSendRequestInfo)
+            willSendRequestInfo->isHolded = true;
+
+        if (WKE_DID_NAVIGATE == type)
+            wkeRunJS(self->m_webContents->getWkeView(), ";"); // 为了<webview>标签，强制触发js创建回调
+
+        ThreadCall::callUiThreadAsync([id, self, state, isDestroyApiBeCalled, type, willSendRequestInfo] {
+            if (!IdLiveDetect::get()->isLive(id) ||
+                WindowDestroying == state ||
+                WindowDestroyed == state ||
+                isDestroyApiBeCalled) {
+                return;
+            }
+
+            if (WKE_DID_START_LOADING == type)
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-start-loading");
+            else if (WKE_DID_STOP_LOADING == type)
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-stop-loading");
+            else if (WKE_DID_GET_RESPONSE_DETAILS == type) {
+
+            } else if (WKE_DID_GET_REDIRECT_REQUEST == type) {
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-get-redirect-request",
+                    std::string(wkeGetString(willSendRequestInfo->url)),
+                    std::string(wkeGetString(willSendRequestInfo->newUrl)),
+                    willSendRequestInfo->resourceType == WKE_RESOURCE_TYPE_MAIN_FRAME,
+                    willSendRequestInfo->httpResponseCode,
+                    std::string(wkeGetString(willSendRequestInfo->method)),
+                    std::string(wkeGetString(willSendRequestInfo->referrer)));
+                wkeDeleteWillSendRequestInfo(nullptr, willSendRequestInfo);
+            }
         });
     }
 
@@ -1332,17 +1693,33 @@ private:
         int id = self->m_id;
         WindowState state = self->m_state;
         bool isDestroyApiBeCalled = self->m_isDestroyApiBeCalled;
-        ThreadCall::callUiThreadAsync([id, self, result, state, isDestroyApiBeCalled] {
+        wkeTempCallbackInfo* tempInfo = wkeGetTempCallbackInfo(webView);
+        bool isMainFrame = wkeIsMainFrame(webView, tempInfo->frame);
+        std::string* failedReasonString = new std::string(wkeGetString(failedReason));
+        std::string* urlString = new std::string(wkeGetString(url));
+
+        ThreadCall::callUiThreadAsync([id, self, result, state, isDestroyApiBeCalled, failedReasonString, urlString, isMainFrame] {
             if (!IdLiveDetect::get()->isLive(id) ||
                 WindowDestroying == state ||
                 WindowDestroyed == state ||
-                isDestroyApiBeCalled)
+                isDestroyApiBeCalled) {
+                delete failedReasonString;
+                delete urlString;
                 return;
+            }
 
-            if (result == WKE_LOADING_SUCCEEDED)
-                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-finish-load");
-            else
-                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-fail-load");
+            if (result == WKE_LOADING_SUCCEEDED) {
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-frame-finish-load", isMainFrame);
+                if (isMainFrame)
+                    self->m_webContents->mate::EventEmitter<WebContents>::emit("did-finish-load");
+            } else {
+                self->m_webContents->mate::EventEmitter<WebContents>::emit("did-fail-provisional-load", 0, *failedReasonString, *urlString, isMainFrame);
+
+                if (result == WKE_LOADING_FAILED)
+                    self->m_webContents->mate::EventEmitter<WebContents>::emit("did-fail-load", 0, *failedReasonString, *urlString, isMainFrame);
+            }
+            delete failedReasonString;
+            delete urlString;
         });
     }
 
@@ -1372,9 +1749,28 @@ private:
             }
         });
     }
+
+    static void onStartDraggingCallback(
+        wkeWebView webView,
+        void* param,
+        wkeWebFrameHandle frame,
+        const wkeWebDragData* data,
+        wkeWebDragOperationsMask mask,
+        const void* image,
+        const wkePoint* dragImageOffset
+        ) {
+        Window* self = (Window*)param;
+        
+        ThreadCall::callUiThreadAsync([self, webView, param, frame, data, mask, image, dragImageOffset] {
+            self->m_dragAction->onStartDragging(webView, param, frame, data, mask, image, dragImageOffset);
+            ThreadCall::exitReEnterMessageLoop(ThreadCall::getBlinkThreadId());
+        });
+
+        ThreadCall::messageLoop(ThreadCall::getBlinkLoop(), ThreadCall::getBlinkThreadV8Platform(), v8::Isolate::GetCurrent());
+    }
     
     static Window* newWindow(gin::Dictionary* options, v8::Local<v8::Object> wrapper) {
-        Window* win = new Window(options->isolate(), wrapper);
+        Window* self = new Window(options->isolate(), wrapper);
         WebContents::CreateWindowParam* createWindowParam = new WebContents::CreateWindowParam();
         createWindowParam->styles = 0;
         createWindowParam->styleEx = 0;
@@ -1402,12 +1798,12 @@ private:
             if (webPreferences.Get("offscreen", &offscreen) && offscreen)
                 options->Set(options::kFrame, false);
             
-            webContents = WebContents::create(options->isolate(), webPreferences, win);
+            webContents = WebContents::create(options->isolate(), webPreferences, self);
 
             webPreferences.GetBydefaultVal("nodeIntegration", true, &webContents->m_isNodeIntegration);
         } else
             DebugBreak();
-        win->m_webContents = webContents;
+        self->m_webContents = webContents;
         
         options->GetBydefaultVal("minWidth", 1, &createWindowParam->minWidth);
         options->GetBydefaultVal("minHeight", 1, &createWindowParam->minHeight);
@@ -1454,13 +1850,28 @@ private:
         if (!createWindowParam->isFrame)
             createWindowParam->styles = WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_POPUP;
 
-        win->newWindowTaskInUiThread(createWindowParam);
+        self->newWindowTaskInUiThread(createWindowParam);
 
-        return win;
+        return self;
+    }
+
+    static void matchDpi(wkeWebView webview) {
+        if (base::win::OSInfo::GetInstance()->version() < base::win::VERSION_WIN8)
+            return;
+
+        HDC hdc = ::GetDC(nullptr);
+        int t = ::GetDeviceCaps(hdc, DESKTOPHORZRES);
+        int d = ::GetDeviceCaps(hdc, HORZRES);
+        int logPixelsx = ::GetDeviceCaps(hdc, LOGPIXELSX);
+        float s_kScaleX = (float)t / (float)d;
+        s_kScaleX = logPixelsx / 96.0f;
+
+        wkeSetZoomFactor(webview, s_kScaleX);
     }
 
     void newWindowTaskInUiThread(const WebContents::CreateWindowParam* createWindowParam) {
         m_createWindowParam = createWindowParam;
+
         m_hWnd = ::CreateWindowEx(createWindowParam->styleEx,
             kElectronClassName, createWindowParam->title.c_str(),
             createWindowParam->styles, createWindowParam->x,
@@ -1470,22 +1881,12 @@ private:
         if (!::IsWindow(m_hWnd))
             return;
 
-        //::RegisterDragDrop(m_hWnd, nullptr);
-        ::DragAcceptFiles(m_hWnd, true);
-
         HWND dwFlag = HWND_NOTOPMOST;
         if (createWindowParam->isAlwaysOnTop)
             dwFlag = HWND_TOPMOST;
         ::SetWindowPos(m_hWnd, dwFlag, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOREPOSITION);
 
-//         if (!createWindowParam->isFrame) {
-//             RECT windowRect;
-//             ::GetWindowRect(m_hWnd, &windowRect);
-//             int nWidthEllipse = 7;
-//             int nHeightEllipse = 7;
-//             HRGN hRgn = ::CreateRoundRectRgn(0, 0, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top, nWidthEllipse, nHeightEllipse);
-//             ::SetWindowRgn(m_hWnd, hRgn, TRUE);
-//         }
+        setRoundWindow();
 
         if (!createWindowParam->isClosable)
             ::EnableMenuItem(::GetSystemMenu(m_hWnd, false), SC_CLOSE, MF_BYCOMMAND | MF_GRAYED);
@@ -1498,23 +1899,41 @@ private:
         int width = m_clientRect.right - m_clientRect.left;
         int height = m_clientRect.bottom - m_clientRect.top;
 
-        Window* win = this;
-        int id = win->m_id;
+        Window* self = this;
+        int id = self->m_id;
         HWND hWnd = m_hWnd;
-        ThreadCall::callBlinkThreadAsync([id, win, createWindowParam, width, height] {
+        ThreadCall::callBlinkThreadAsync([id, self, createWindowParam, hWnd, width, height] {
             if (!IdLiveDetect::get()->isLive(id))
                 return;
 
-            wkeWebView webview = win->m_webContents->getWkeView();
-            win->m_webContents->onNewWindowInBlinkThread(width, height, createWindowParam);
-            wkeOnPaintUpdated(webview, (wkePaintUpdatedCallback)staticOnPaintUpdatedInCompositeThread, win);
-            wkeOnConsole(webview, onConsoleCallback, nullptr);
-            wkeOnDocumentReady(webview, onDocumentReadyInBlinkThread, win);
-            wkeOnLoadUrlBegin(webview, handleLoadUrlBegin, nullptr);
-            wkeOnTitleChanged(webview, onTitleChangedInBlinkThread, win);
-            wkeOnLoadingFinish(webview, onLoadingFinishCallback, win);
-            wkeOnDraggableRegionsChanged(webview, onDraggableRegionsChanged, win);
+            wkeWebView webview = self->m_webContents->getWkeView();
+            self->m_webContents->onNewWindowInBlinkThread(width, height, createWindowParam);
 
+            matchDpi(webview);
+
+            //wkeSetDebugConfig(webview, "drawDirtyDebugLine", nullptr);
+            wkeSetHandle(webview, hWnd);
+            wkeOnPaintUpdated(webview, (wkePaintUpdatedCallback)staticOnPaintUpdatedInCompositeThread, self);
+            wkeOnConsole(webview, onConsoleCallback, nullptr);
+            wkeOnDocumentReady(webview, onDocumentReadyInBlinkThread, self);
+            wkeOnLoadUrlBegin(webview, handleLoadUrlBegin, self);
+            wkeOnTitleChanged(webview, onTitleChangedInBlinkThread, self);
+            wkeOnURLChanged2(webview, onURLChangedCallback, self);
+            wkeOnLoadingFinish(webview, onLoadingFinishCallback, self);
+            wkeOnOtherLoad(webview, onOtherLoadCallback, self);
+            wkeOnNavigation(webview, onNavigationCallback, self);
+            wkeOnDraggableRegionsChanged(webview, onDraggableRegionsChanged, self);
+            wkeOnStartDragging(webview, onStartDraggingCallback, self);
+            wkeSetFocus(webview);
+            wkeSetDebugConfig(webview, "decodeUrlRequest", nullptr);
+            wkeSetDragDropEnable(webview, false);
+            wkeAddNpapiPlugin(webview, "application/browser-plugin", &Webview_NP_Initialize, &Webview_NP_GetEntryPoints, &Webview_NP_Shutdown);
+            wkeSetDebugConfig(webview, "wakeMinInterval", "1");
+            wkeSetDebugConfig(webview, "drawMinInterval", "30");
+            //wkeSetDebugConfig(webview, "contentScale", "50");
+
+            if (createWindowParam->transparent)
+                wkeSetTransparent(webview, true);
         });
 
         MenuEventNotif::onWindowDidCreated(this);
@@ -1532,8 +1951,8 @@ private:
                 return;
 
             gin::Dictionary options(isolate, args[0]->ToObject());
-            Window* win = newWindow(&options, args.This());
-            WindowList::getInstance()->addWindow(win);
+            Window* self = newWindow(&options, args.This());
+            WindowList::getInstance()->addWindow(self);
 
             args.GetReturnValue().Set(args.This());
         }
@@ -1547,6 +1966,8 @@ public:
     static const WCHAR* kPrppW;
 
 private:
+    friend class WindowInterface;
+
     enum WindowState {
         WindowUninited,
         WindowInited,
@@ -1559,6 +1980,8 @@ private:
     bool m_isDestroyApiBeCalled;
     
     HWND m_hWnd;
+    HIMC m_hIMC;
+
     int m_cursorInfoType;
     bool m_isCursorInfoTypeAsynGetting;
     CRITICAL_SECTION m_memoryCanvasLock;
@@ -1572,6 +1995,30 @@ private:
     bool m_isMaximized;
 
     const WebContents::CreateWindowParam* m_createWindowParam;
+    DragAction* m_dragAction;
+
+    CRITICAL_SECTION m_mouseMsgQueueLock;
+    struct MouseMsg {
+        MouseMsg(const MouseMsg& other) {
+            init(message, x, y, flags);
+        }
+
+        MouseMsg(unsigned int message, int x, int y, unsigned int flags) {
+            init(message, x, y, flags);
+        }
+
+        void init(unsigned int message, int x, int y, unsigned int flags) {
+            this->message = message;
+            this->x = x;
+            this->y = y;
+            this->flags = flags;
+        }
+        unsigned int message;
+        int x;
+        int y;
+        unsigned int flags;
+    };
+    std::list<MouseMsg*> m_mouseMsgQueue;
 
     int m_id;
 };
@@ -1579,11 +2026,25 @@ private:
 v8::Local<v8::Value> WindowInterface::getFocusedWindow(v8::Isolate* isolate) {
     v8::Local<v8::Value> result;
     HWND focusWnd = ::GetFocus();
-    Window* win = (Window*)::GetPropW(focusWnd, Window::kPrppW);
-    if (!win)
+    Window* self = (Window*)::GetPropW(focusWnd, Window::kPrppW);
+    if (!self)
         result = v8::Null(isolate);
     else
-        result = win->GetWrapper(isolate);
+        result = self->GetWrapper(isolate);
+    return result;
+}
+
+v8::Local<v8::Value> WindowInterface::getFocusedContents(v8::Isolate* isolate) {
+    v8::Local<v8::Value> result;
+    HWND focusWnd = ::GetFocus();
+    Window* self = (Window*)::GetPropW(focusWnd, Window::kPrppW);
+    if (!self)
+       return v8::Null(isolate);
+    
+    WebContents* content = self->getWebContents();
+    if (!content)
+        return v8::Null(isolate);
+    result = content->GetWrapper(isolate);
     return result;
 }
 
@@ -1594,19 +2055,30 @@ gin::WrapperInfo Window::kWrapperInfo = { gin::kEmbedderNativeGin };
 static void initializeWindowApi(v8::Local<v8::Object> target, v8::Local<v8::Value> unused, v8::Local<v8::Context> context, const NodeNative* native) {
     node::Environment* env = node::Environment::GetCurrent(context);
     Window::init(target, env);
-    WNDCLASS wndClass = { 0 };
-    if (!GetClassInfoW(NULL, kElectronClassName, &wndClass)) {
-        wndClass.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
+    WNDCLASSEXW wndClass = { 0 };
+
+    static bool isInitClass = false;
+
+    if (!isInitClass) {
+        isInitClass = true;
+
+        wndClass.style = CS_HREDRAW | CS_VREDRAW;
+        if (base::win::OSInfo::GetInstance()->version() < base::win::VERSION_WIN8)
+            wndClass.style |= CS_DROPSHADOW;
+
+        HMODULE hMod = ::GetModuleHandleW(NULL);
+        wndClass.cbSize = sizeof(WNDCLASSEX);
         wndClass.lpfnWndProc = &Window::staticWindowProc;
-        wndClass.cbClsExtra = 200;
-        wndClass.cbWndExtra = 200;
-        wndClass.hInstance = GetModuleHandleW(NULL);
-        //wndClass.hIcon = LoadIcon(GetModuleHandleW(NULL), MAKEINTRESOURCE(IDI_ICON1));
-        wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wndClass.cbClsExtra = 0;
+        wndClass.cbWndExtra = 0;
+        wndClass.hInstance = hMod;
+        wndClass.hIcon = LoadIcon(hMod, MAKEINTRESOURCE(IDC_SMALL));
+        wndClass.hCursor = LoadCursor(hMod, IDC_ARROW);
         wndClass.hbrBackground = NULL;
         wndClass.lpszMenuName = NULL;
-        wndClass.lpszClassName = kElectronClassName;
-        RegisterClass(&wndClass);
+        wndClass.lpszClassName = WindowInterface::kElectronClassName;
+        wndClass.hIconSm = LoadIcon(hMod, MAKEINTRESOURCE(IDC_SMALL));
+        ::RegisterClassExW(&wndClass);
     }
 }
 

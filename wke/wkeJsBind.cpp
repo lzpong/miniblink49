@@ -7,10 +7,13 @@
 #include "third_party/WebKit/Source/wtf/text/WTFStringUtil.h"
 #include "third_party/WebKit/Source/bindings/core/v8/V8StringResource.h"
 #include "third_party/WebKit/Source/bindings/core/v8/V8Binding.h"
+#include "third_party/WebKit/Source/bindings/core/v8/V8RecursionScope.h"
 #include "third_party/WebKit/Source/core/frame/LocalDOMWindow.h"
 #include "third_party/WebKit/Source/core/frame/LocalFrame.h"
 #include "third_party/WebKit/Source/core/page/ChromeClient.h"
-#include "third_party/WebKit/Source/bindings/core/v8/V8RecursionScope.h"
+#include "third_party/WebKit/Source/platform/UserGestureIndicator.h"
+#include "third_party/WebKit/public/web/WebScriptSource.h"
+#include "third_party/WebKit/public/web/WebLocalFrame.h"
 #include "content/browser/WebFrameClientImpl.h"
 #include "content/browser/WebPage.h"
 
@@ -18,6 +21,7 @@
 #include "wke/wke.h"
 #include "wke/wkeJsBind.h"
 #include "wke/wkeWebView.h"
+#include "wke/wkeRecordExceptionInfo.h"
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -59,7 +63,7 @@ class WkeJsValue {
 public:
     enum Type {
         wkeJsValueInt,
-        wkeJsValueFloat,
+        wkeJsValueDouble,
         wkeJsValueBool,
         wkeJsValueString,
         wkeJsValueV8Value,
@@ -71,6 +75,7 @@ public:
     {
         isolate = nullptr;
         type = wkeJsValueUndefined;
+        refCount = 0;
     }
 
     ~WkeJsValue()
@@ -78,15 +83,24 @@ public:
         value.Reset();
         context.Reset();
     }
+
+    static void firstJsObjectWeakCallback(const v8::WeakCallbackInfo<WkeJsValue>& data)
+    {
+        WkeJsValue* self = data.GetParameter();
+        delete self;
+    }
+
     v8::Isolate* isolate;
     v8::Persistent<v8::Value> value;
     v8::Persistent<v8::Context> context;
 
     Type type;
     int intVal;
-    float floatVal;
+    double doubleVal;
     bool boolVal;
     WTF::CString stringVal;
+
+    int refCount;
 };
 
 typedef WTF::HashMap<jsValue, WkeJsValue*> JsValueMap;
@@ -98,6 +112,19 @@ static JsValueMap::iterator findJsValueMap(jsValue value)
         return s_jsValueMap->end();
     JsValueMap::iterator it = s_jsValueMap->find(value);
     return it;
+}
+
+static void freeJsValue(jsValue value)
+{
+    if (0 == value)
+        return;
+    JsValueMap::iterator it = s_jsValueMap->find(value);
+    if (it == s_jsValueMap->end())
+        return;
+
+    WkeJsValue* v = it->value;
+    delete v;
+    s_jsValueMap->remove(it);
 }
 
 static bool isJsValueValid(jsValue value)
@@ -118,8 +145,8 @@ static v8::Local<v8::Value> getV8Value(jsValue v, v8::Local<v8::Context> context
     if (WkeJsValue::wkeJsValueInt == wkeValue->type) {
         v8::Local<v8::Integer> out = v8::Integer::New(v8::Isolate::GetCurrent(), wkeValue->intVal);
         return out;
-    } else if (WkeJsValue::wkeJsValueFloat == wkeValue->type) {
-        v8::Local<v8::Number> out = v8::Number::New(v8::Isolate::GetCurrent(), wkeValue->floatVal);
+    } else if (WkeJsValue::wkeJsValueDouble == wkeValue->type) {
+        v8::Local<v8::Number> out = v8::Number::New(v8::Isolate::GetCurrent(), wkeValue->doubleVal);
         return out;
     } else if (WkeJsValue::wkeJsValueBool == wkeValue->type) {
         v8::Local<v8::Boolean> out = v8::Boolean::New(v8::Isolate::GetCurrent(), wkeValue->boolVal);
@@ -138,16 +165,19 @@ static v8::Local<v8::Value> getV8Value(jsValue v, v8::Local<v8::Context> context
     }
     
     v8::Isolate* isolate = wkeValue->isolate;
-//     v8::HandleScope handleScope(isolate);
-//     v8::Context::Scope contextScope(context);
-
     v8::Local<v8::Value> out = v8::Local<v8::Value>::New(isolate, wkeValue->value);
     return out;
 }
 
 static __int64 s_handleCount = 0;
 
-static jsValue createJsValueByLocalValue(v8::Isolate* isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> value)
+static jsValue createJsValueByLocalValue2(
+    v8::Isolate* isolate, 
+    v8::Local<v8::Context> context, 
+    v8::Local<v8::Value> value,
+    WkeJsValue** outWkeJsValue,
+    bool isAutoGC
+    )
 {
     s_handleCount++;
 
@@ -157,9 +187,19 @@ static jsValue createJsValueByLocalValue(v8::Isolate* isolate, v8::Local<v8::Con
 
     out->type = WkeJsValue::wkeJsValueV8Value;
     out->context.Reset(isolate, context);
+    if (!isAutoGC)
+        out->refCount++;
+
+    if (outWkeJsValue)
+        *outWkeJsValue = out;
 
     s_jsValueMap->add(s_handleCount, out);
     return s_handleCount;
+}
+
+static jsValue createJsValueByLocalValue(v8::Isolate* isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> value)
+{
+    return createJsValueByLocalValue2(isolate, context, value, nullptr, true);
 }
 
 static jsValue createEmptyJsValue(WkeJsValue** out)
@@ -225,14 +265,16 @@ jsType jsTypeOf(jsValue v)
         return JSTYPE_UNDEFINED;
 
     WkeJsValue* wkeValue = it->value;
-    if (WkeJsValue::wkeJsValueInt == wkeValue->type || WkeJsValue::wkeJsValueFloat == wkeValue->type)
+    if (WkeJsValue::wkeJsValueInt == wkeValue->type || WkeJsValue::wkeJsValueDouble == wkeValue->type)
         return JSTYPE_NUMBER;
     else if (WkeJsValue::wkeJsValueBool == wkeValue->type)
         return JSTYPE_BOOLEAN;
     else if (WkeJsValue::wkeJsValueString == wkeValue->type)
         return JSTYPE_STRING;
-    else if (WkeJsValue::wkeJsValueNull == wkeValue->type || WkeJsValue::wkeJsValueUndefined == wkeValue->type)
+    else if (WkeJsValue::wkeJsValueUndefined == wkeValue->type)
         return JSTYPE_UNDEFINED;
+    else if (WkeJsValue::wkeJsValueNull == wkeValue->type)
+        return JSTYPE_NULL;
 
     v8::Isolate* isolate = wkeValue->isolate;
     v8::HandleScope handleScope(isolate);
@@ -241,7 +283,7 @@ jsType jsTypeOf(jsValue v)
     v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeValue->isolate, wkeValue->value);
 
     if (value.IsEmpty())
-        return JSTYPE_UNDEFINED;
+        return JSTYPE_NULL;
 
     if (value->IsUndefined())
         return JSTYPE_UNDEFINED;
@@ -380,6 +422,8 @@ int jsToInt(jsExecState es, jsValue v)
         return value->ToInt32()->Value();
     } else if (WkeJsValue::wkeJsValueInt == wkeValue->type) {
         return wkeValue->intVal;
+    } else if (WkeJsValue::wkeJsValueDouble == wkeValue->type) {
+        return (int)wkeValue->doubleVal;
     }
     return 0;
 }
@@ -403,8 +447,10 @@ double jsToDouble(jsExecState es, jsValue v)
         v8::HandleScope handleScope(isolate);
         v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeValue->isolate, wkeValue->value);
         return value->ToNumber()->Value();
-    } else if (WkeJsValue::wkeJsValueFloat == wkeValue->type)
-        return wkeValue->floatVal;
+    } else if (WkeJsValue::wkeJsValueInt == wkeValue->type) {
+        return (double)wkeValue->intVal;
+    } else if (WkeJsValue::wkeJsValueDouble == wkeValue->type)
+        return wkeValue->doubleVal;
     return 0.0;
 }
 
@@ -428,9 +474,6 @@ bool jsToBoolean(jsExecState es, jsValue v)
     return false;
 }
 
-static std::vector<std::vector<char>*> s_sharedStringBuffers;
-static std::vector<std::vector<wchar_t>*> s_sharedStringBuffersW;
-
 const wchar_t* jsToTempStringW(jsExecState es, jsValue v)
 {
     const utf8* utf8String = jsToTempString(es, v);
@@ -438,17 +481,11 @@ const wchar_t* jsToTempStringW(jsExecState es, jsValue v)
     if (0 == utf16.size())
         return L"";
 
-    std::vector<wchar_t>* stringBuffer = new std::vector<wchar_t>();
-    s_sharedStringBuffersW.push_back(stringBuffer);
-
-    stringBuffer->resize(utf16.size());
-    memcpy(&stringBuffer->at(0), utf16.data(), utf16.size() * sizeof(wchar_t));
-    stringBuffer->push_back('\0');
-
-    return &stringBuffer->at(0);
+    return wke::createTempWCharString(utf16.data(), utf16.size());
 }
 
-const utf8* jsToTempString(jsExecState es, jsValue v) {
+const utf8* jsToTempString(jsExecState es, jsValue v)
+{
     if (!s_execStates || !s_execStates->contains(es) || !es)
         return "";
 
@@ -481,11 +518,11 @@ const utf8* jsToTempString(jsExecState es, jsValue v) {
             return "";
         sharedStringBuffer.append(wkeValue->stringVal.data(), wkeValue->stringVal.length() - 1);
     } else if (WkeJsValue::wkeJsValueInt == wkeValue->type) {
-            WTF::CString intVal = String::format("%d", wkeValue->intVal).utf8();
-            int len = intVal.length();
-            sharedStringBuffer.append(intVal.data(), len);
-    } else if (WkeJsValue::wkeJsValueFloat == wkeValue->type) {
-        WTF::CString floatVal = String::format("%f", wkeValue->floatVal).utf8();
+        WTF::CString intVal = String::format("%d", wkeValue->intVal).utf8();
+        int len = intVal.length();
+        sharedStringBuffer.append(intVal.data(), len);
+    } else if (WkeJsValue::wkeJsValueDouble == wkeValue->type) {
+        WTF::CString floatVal = String::format("%f", (float)(wkeValue->doubleVal)).utf8();
         int len = floatVal.length();
         sharedStringBuffer.append(floatVal.data(), len);
     } else if (WkeJsValue::wkeJsValueBool == wkeValue->type) {
@@ -501,13 +538,7 @@ const utf8* jsToTempString(jsExecState es, jsValue v) {
     if (0 == sharedStringBuffer.size())
         return "";
 
-    std::vector<char>* stringBuffer = new std::vector<char>();
-    s_sharedStringBuffers.push_back(stringBuffer);
-
-    stringBuffer->resize(sharedStringBuffer.size());
-    memcpy(&stringBuffer->at(0), sharedStringBuffer.data(), sharedStringBuffer.size());
-    stringBuffer->push_back('\0');
-    return &stringBuffer->at(0);
+    return wke::createTempCharString(sharedStringBuffer.data(), sharedStringBuffer.size());
 }
 
 const utf8* jsToString(jsExecState es, jsValue v)
@@ -518,6 +549,22 @@ const utf8* jsToString(jsExecState es, jsValue v)
 const wchar_t* jsToStringW(jsExecState es, jsValue v)
 {
     return jsToTempStringW(es, v);
+}
+
+void* jsToV8Value(jsExecState es, jsValue v)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es)
+        return nullptr;
+
+    JsValueMap::iterator it = findJsValueMap(v);
+    if (it == s_jsValueMap->end())
+        return nullptr;
+
+    WkeJsValue* wkeValue = it->value;
+
+    if (WkeJsValue::wkeJsValueV8Value != wkeValue->type)
+        return nullptr;
+    return &wkeValue->value;
 }
 
 jsValue jsInt(int n)
@@ -531,16 +578,16 @@ jsValue jsInt(int n)
 
 jsValue jsFloat(float f)
 {
-    WkeJsValue* out;
-    jsValue ret = createEmptyJsValue(&out);
-    out->type = WkeJsValue::wkeJsValueFloat;
-    out->floatVal = f;
-    return ret;
+    return jsDouble(f);
 }
 
 jsValue jsDouble(double d)
 {
-    return jsFloat((float)d);
+    WkeJsValue* out;
+    jsValue ret = createEmptyJsValue(&out);
+    out->type = WkeJsValue::wkeJsValueDouble;
+    out->doubleVal = d;
+    return ret;
 }
 
 jsValue jsBoolean(bool b)
@@ -612,6 +659,52 @@ jsValue jsStringW(jsExecState es, const wchar_t* str)
     if (value.IsEmpty())
         return jsUndefined();
     return createJsValueByLocalValue(es->isolate, context, value.ToLocalChecked());
+}
+
+jsValue jsArrayBuffer(jsExecState es, char * buffer, size_t size)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return jsUndefined();
+    if (es->context.IsEmpty())
+        DebugBreak();
+
+    v8::Isolate* isolate = es->isolate;
+    v8::HandleScope handleScope(isolate);
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
+    v8::Context::Scope contextScope(context);
+
+    v8::Local<v8::ArrayBuffer> value = v8::ArrayBuffer::New(es->isolate, size);
+    memcpy(value->GetContents().Data(), buffer, size);
+
+    if (value.IsEmpty())
+        return jsUndefined();
+
+    return createJsValueByLocalValue(es->isolate, context, value);
+}
+
+wkeMemBuf* jsGetArrayBuffer(jsExecState es, jsValue value)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es)
+        return nullptr;
+
+    JsValueMap::iterator it = findJsValueMap(value);
+    if (it == s_jsValueMap->end())
+        return nullptr;
+
+    v8::Isolate* isolate = es->isolate;
+    v8::HandleScope handleScope(isolate);
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
+    v8::Context::Scope contextScope(context);
+
+    v8::Local<v8::Value> valueV8 = getV8Value(value, context);
+    if (valueV8.IsEmpty() || !valueV8->IsArrayBuffer())
+        return nullptr;
+
+    v8::ArrayBuffer* arrayBuffer = v8::ArrayBuffer::Cast(*valueV8);
+    v8::ArrayBuffer::Contents contents = arrayBuffer->GetContents();
+    wkeMemBuf* result = wkeCreateMemBuf(nullptr, contents.Data(), contents.ByteLength());
+
+    return result;
 }
 
 jsValue jsEmptyObject(jsExecState es)
@@ -712,6 +805,83 @@ jsValue jsEvalExW(jsExecState es, const wchar_t* str, bool isInClosure)
     return createJsValueByLocalValue(isolate, context, result);
 }
 
+jsExceptionInfo* g_jsExceptionInfo = nullptr;
+
+static char* mallocEmpty()
+{
+    char* result = (char*)malloc(1);
+    result[0] = 0;
+    return result;
+}
+
+static char* strDupWithLengthLimit(const char* str, int length)
+{
+    if (!str || 0 == length)
+        return mallocEmpty();
+
+    if (length > 1000)
+        length = 1000;
+    char* result = (char*)malloc(length + 1);
+    memcpy(result, str, length);
+    result[length] = 0;
+    return result;
+}
+
+static std::string* saveCallstack(v8::Local<v8::StackTrace> stackTrace)
+{
+    std::string* outString = new std::string();
+
+    const v8::StackTrace::StackTraceOptions options = static_cast<v8::StackTrace::StackTraceOptions>(
+        v8::StackTrace::kLineNumber |
+        v8::StackTrace::kColumnOffset |
+        v8::StackTrace::kScriptId |
+        v8::StackTrace::kScriptNameOrSourceURL |
+        v8::StackTrace::kFunctionName);
+
+    int stackNum = 50;
+    if (stackTrace.IsEmpty())
+        stackTrace = v8::StackTrace::CurrentStackTrace(v8::Isolate::GetCurrent(), stackNum, options);
+    int count = stackTrace->GetFrameCount();
+
+    for (int i = 0; i < count; ++i) {
+        v8::Local<v8::StackFrame> stackFrame = stackTrace->GetFrame(i);
+        int frameCount = stackTrace->GetFrameCount();
+        int line = stackFrame->GetLineNumber();
+        v8::Local<v8::String> scriptName = stackFrame->GetScriptNameOrSourceURL();
+        v8::Local<v8::String> funcName = stackFrame->GetFunctionName();
+
+        std::string scriptNameWTF;
+        std::string funcNameWTF;
+
+        if (!scriptName.IsEmpty()) {
+            v8::String::Utf8Value scriptNameUtf8(scriptName);
+            scriptNameWTF = *scriptNameUtf8;
+        }
+
+        if (!funcName.IsEmpty()) {
+            v8::String::Utf8Value funcNameUtf8(funcName);
+            funcNameWTF = *funcNameUtf8;
+        }
+        std::vector<char> output;
+        output.resize(1000);
+        sprintf(&output[0], "line:%d, [", line);
+        *outString += (&output[0]);
+
+        if (!scriptNameWTF.empty()) {
+            *outString += (scriptNameWTF.c_str());
+        }
+        *outString += ("] , [");
+
+        if (!funcNameWTF.empty()) {
+            *outString += (funcNameWTF.c_str());
+        }
+        *outString += ("]\n");
+    }
+    *outString += ("\n");
+
+    return outString;
+}
+
 jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, int argCount)
 {
     if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
@@ -723,6 +893,7 @@ jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, i
     v8::HandleScope handleScope(isolate);
     v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
     v8::Context::Scope contextScope(context);
+    blink::UserGestureIndicator gestureIndicator(blink::DefinitelyProcessingUserGesture);
 
     v8::Local<v8::Value>* argv = new v8::Local<v8::Value>[argCount];
     for (int i = 0; i < argCount; ++i) {
@@ -730,7 +901,7 @@ jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, i
     }
 
     v8::Local<v8::Value> cbValue = getV8Value(func, context);
-    if (!cbValue->IsFunction())
+    if (cbValue.IsEmpty() || !cbValue->IsFunction())
         return jsUndefined();
 
     v8::Function* cb = v8::Function::Cast(*cbValue);
@@ -741,8 +912,20 @@ jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, i
     
     if (thisValueV8.IsEmpty() || thisValueV8->IsUndefined())
         thisValueV8 = context->Global();
+
+    v8::TryCatch tryCatch;
+    tryCatch.SetVerbose(true);
+
     v8::MaybeLocal<v8::Value> ret = cb->Call(context, thisValueV8, argCount, argv);
 
+    if (tryCatch.HasCaught()) {
+        wke::AutoAllowRecordJsExceptionInfo autoAllowRecordJsExceptionInfo;
+        wke::recordJsExceptionInfo(tryCatch);
+    } else {
+        delete g_jsExceptionInfo;
+        g_jsExceptionInfo = nullptr;
+    }
+    
     delete[] argv;
 
     if (ret.IsEmpty())
@@ -752,9 +935,33 @@ jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, i
     return createJsValueByLocalValue(isolate, context, v8Ret);
 }
 
+const utf8* jsGetCallstack(jsExecState es)
+{
+    std::string* callstack = saveCallstack(v8::Local<v8::StackTrace>());
+    const utf8* result = wke::createTempCharString(callstack->c_str(), callstack->size());
+    delete callstack;
+    return result;
+}
+
 jsValue jsCallGlobal(jsExecState es, jsValue func, jsValue* args, int argCount)
 {
     return jsCall(es, func, jsUndefined(), args, argCount);
+}
+
+jsExceptionInfo* jsGetLastErrorIfException(jsExecState es)
+{
+    return g_jsExceptionInfo;
+}
+
+jsValue jsThrowException(jsExecState es, const utf8* exception)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return jsUndefined();
+    RELEASE_ASSERT(!es->context.IsEmpty());
+
+    v8::Isolate* isolate = es->isolate;
+    isolate->ThrowException(v8::Exception::Error(v8::String::NewFromUtf8(isolate, exception)));
+    return jsUndefined();
 }
 
 jsValue jsGet(jsExecState es, jsValue object, const char* prop)
@@ -831,6 +1038,47 @@ void jsSetGlobal(jsExecState es, const char* prop, jsValue v)
     jsSet(es, jsGlobalObject(es), prop, v);
 }
 
+void jsDeleteObjectProp(jsExecState es, jsValue object, const char* prop)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return;
+    if (es->context.IsEmpty())
+        DebugBreak();
+    v8::Isolate* isolate = es->isolate;
+    v8::HandleScope handleScope(isolate);
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
+    v8::Context::Scope contextScope(context);
+
+    v8::Local<v8::Value> objectLocal = getV8Value(object, context);
+    if (objectLocal.IsEmpty() || !objectLocal->IsObject())
+        return;
+
+    v8::Local<v8::Object> obj = objectLocal->ToObject();
+    v8::MaybeLocal<v8::String> propV8 = v8::String::NewFromUtf8(isolate, prop, v8::NewStringType::kNormal, -1);
+    if (propV8.IsEmpty())
+        return;
+    obj->Delete(propV8.ToLocalChecked());
+}
+
+bool jsIsValidExecState(jsExecState es)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return false;
+    return true;
+}
+
+bool jsIsJsValueValid(jsExecState es, jsValue object)
+{
+    if (!jsIsValidExecState(es))
+        return false;
+
+    JsValueMap::iterator it = findJsValueMap(object);
+    if (it == s_jsValueMap->end())
+        return false;
+
+    return true;
+}
+
 jsValue jsGetAt(jsExecState es, jsValue object, int index)
 {
     if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
@@ -892,12 +1140,8 @@ void jsSetAt(jsExecState es, jsValue object, int index, jsValue value)
 
 int jsGetLength(jsExecState es, jsValue object)
 {
-//     JSC::ExecState* exec = (JSC::ExecState*)es;
-//     JSC::JSValue o = JSC::JSValue::decode(object);
-//     return o.get(exec, JSC::Identifier(exec, "length")).toInt32(exec);
-
     if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
-        return jsUndefined();
+        return 0;
     if (es->context.IsEmpty())
         DebugBreak();
 
@@ -929,25 +1173,21 @@ wkeWebView jsGetWebView(jsExecState es)
 {
     if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
         return nullptr;
-    if (es->context.IsEmpty())
-        DebugBreak();
+    RELEASE_ASSERT(!es->context.IsEmpty());
 
     v8::Isolate* isolate = es->isolate;
-    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
-
     v8::HandleScope handleScope(isolate);
+    
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
     v8::Context::Scope contextScope(context);
+
     v8::Local<v8::Object> globalObj = context->Global();
 
     v8::MaybeLocal<v8::String> nameMaybeLocal = v8::String::NewFromUtf8(isolate, "wkeWebViewToV8Context", v8::NewStringType::kNormal, -1);
     if (nameMaybeLocal.IsEmpty())
         return nullptr;
 
-#if V8_MINOR_VERSION == 7 // zero
     v8::Local<v8::Value> wkeWebViewV8 = blink::V8HiddenValue::getHiddenValue(isolate, globalObj, nameMaybeLocal.ToLocalChecked());
-#else
-    v8::Local<v8::Value> wkeWebViewV8 = globalObj->GetHiddenValue(nameMaybeLocal.ToLocalChecked());
-#endif
     ASSERT(!wkeWebViewV8.IsEmpty());
     wke::CWebView* webView = static_cast<wke::CWebView*>(v8::External::Cast(*wkeWebViewV8)->Value());
     return webView;
@@ -956,6 +1196,76 @@ wkeWebView jsGetWebView(jsExecState es)
 void jsGC()
 {
     //WebCore::gcController().garbageCollectNow();
+}
+
+bool jsAddRef(jsExecState es, jsValue val)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return false;
+    RELEASE_ASSERT(!es->context.IsEmpty());
+
+    v8::Isolate* isolate = es->isolate;
+    v8::HandleScope handleScope(isolate);
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
+    v8::Context::Scope contextScope(context);
+
+    JsValueMap::iterator it = findJsValueMap(val);
+    if (it == s_jsValueMap->end())
+        return false;
+
+    WkeJsValue* wkeValue = it->value;
+
+    if (WkeJsValue::wkeJsValueV8Value != wkeValue->type)
+        return false;
+
+    wkeValue->refCount++;
+
+    wke::CWebView* webview = jsGetWebView(es);
+    webview->getPersistentJsValue().insert(val);
+    //wkeValue->value.SetWeak<WkeJsValue>(wkeValue, &WkeJsValue::firstJsObjectWeakCallback, v8::WeakCallbackType::kInternalFields);
+
+    return true;
+}
+
+static void deletePersistentJsValue(jsValue v);
+
+bool jsReleaseRef(jsExecState es, jsValue val)
+{
+    if (!s_execStates || !s_execStates->contains(es) || !es || !es->isolate)
+        return false;
+    RELEASE_ASSERT(!es->context.IsEmpty());
+
+    v8::Isolate* isolate = es->isolate;
+    v8::HandleScope handleScope(isolate);
+    v8::Local<v8::Context> context = v8::Local<v8::Context>::New(es->isolate, es->context);
+    v8::Context::Scope contextScope(context);
+
+    JsValueMap::iterator it = findJsValueMap(val);
+    if (it == s_jsValueMap->end())
+        return false;
+
+    WkeJsValue* wkeValue = it->value;
+
+    if (WkeJsValue::wkeJsValueV8Value != wkeValue->type)
+        return false;
+
+    wkeValue->refCount--;
+    RELEASE_ASSERT(wkeValue->refCount >= 0);
+    if (0 != wkeValue->refCount)
+        return false;
+
+    RELEASE_ASSERT(WkeJsValue::wkeJsValueV8Value == wkeValue->type);
+    wkeValue->value.Reset();
+    delete wkeValue;
+    s_jsValueMap->remove(it);
+
+    wke::CWebView* webview = jsGetWebView(es);
+    std::set<jsValue>& persistentJsValues = webview->getPersistentJsValue();
+    std::set<jsValue>::iterator iter = persistentJsValues.find(val);
+    RELEASE_ASSERT(iter != persistentJsValues.end());
+    persistentJsValues.erase(iter);
+
+    return true;
 }
 
 struct AddFunctionInfo {
@@ -1047,7 +1357,10 @@ public:
         this->getter = nullptr;
         this->setter = nullptr;
         this->jsDataObj = nullptr;
+        this->m_persistentValue = 0;
     }
+
+    ~NativeGetterSetterWrap() {}
 
     static void AccessorGetterCallbackImpl(v8::Local<v8::Name> property, const v8::PropertyCallbackInfo<v8::Value>& info)
     {
@@ -1091,27 +1404,60 @@ public:
 
         Vector<NativeGetterSetterWrap*>* cachedWraps = nullptr;
         
-#if V8_MINOR_VERSION == 7 //zero
         v8::Local<v8::Value> dataMap = blink::V8HiddenValue::getHiddenValue(isolate, globalObj, addAccessorDataMaybeLocal.ToLocalChecked());
-#else
-        v8::Local<v8::Value> dataMap = globalObj->GetHiddenValue(addAccessorDataMaybeLocal.ToLocalChecked());
-#endif
         if (dataMap.IsEmpty()) {
             cachedWraps = new Vector<NativeGetterSetterWrap*>();
             dataMap = v8::External::New(isolate, cachedWraps);
 
-#if V8_MINOR_VERSION == 7 //zero
             blink::V8HiddenValue::setHiddenValue(isolate, globalObj, addAccessorDataMaybeLocal.ToLocalChecked(), dataMap);
-#else
-            globalObj->SetHiddenValue(addAccessorDataMaybeLocal.ToLocalChecked(), dataMap);
-#endif
         } else {
             cachedWraps = static_cast<Vector<NativeGetterSetterWrap*>*>(v8::External::Cast(*dataMap)->Value());
         }
         NativeGetterSetterWrap* wrap = new NativeGetterSetterWrap();
         cachedWraps->append(wrap);
+
+        wrap->m_cachedWraps = cachedWraps;
         return wrap;
     }
+
+    static void secondJsObjectWeakCallback(const v8::WeakCallbackInfo<NativeGetterSetterWrap>& data)
+    {
+        NativeGetterSetterWrap* self = data.GetParameter();
+        self->gc();
+    }
+
+    void gc()
+    {
+        for (size_t i = 0; i < m_cachedWraps->size(); ++i) {
+            NativeGetterSetterWrap* wrap = m_cachedWraps->at(i);
+            if (wrap != this)
+                continue;
+
+            if (jsDataObj && jsDataObj->finalize)
+                jsDataObj->finalize(jsDataObj);
+
+            m_cachedWraps->remove(i);
+
+            delete this;
+            return;
+        }
+    }
+
+    static void firstJsObjectWeakCallback(const v8::WeakCallbackInfo<NativeGetterSetterWrap>& data)
+    {
+        NativeGetterSetterWrap* self = data.GetParameter();
+        freeJsValue(self->m_persistentValue);
+        //data.SetSecondPassCallback(secondJsObjectWeakCallback);
+        self->gc();       
+    }
+
+    void set(jsValue persistentValue) { m_persistentValue = persistentValue; }
+    jsValue getPersistentValue() { return m_persistentValue; }
+
+
+private:
+    jsValue m_persistentValue;
+    Vector<NativeGetterSetterWrap*>* m_cachedWraps;
 };
 
 static void addAccessor(v8::Local<v8::Context> context, const char* name, wkeJsNativeFunction getter, void* getterParam, wkeJsNativeFunction setter, void* setterParam)
@@ -1142,7 +1488,7 @@ static void addAccessor(v8::Local<v8::Context> context, const char* name, wkeJsN
 }
 
 
-#define MAX_NAME_LENGTH 32
+#define MAX_NAME_LENGTH 1024
 #define MAX_FUNCTION_COUNT 1024
 
 #define JS_FUNC   (0)
@@ -1195,15 +1541,18 @@ static void wkeJsBindSetterGetter(const char* name, wkeJsNativeFunction fn, void
         s_jsFunctionsPtr = new Vector<jsFunctionInfo>();
     Vector<jsFunctionInfo>& s_jsFunctions = *s_jsFunctionsPtr;
 
+    if (strlen(name) > MAX_NAME_LENGTH - 1)
+        return;
+
     for (unsigned int i = 0; i < s_jsFunctions.size(); ++i) {
-        if (strncmp(name, s_jsFunctions[i].name, MAX_NAME_LENGTH) == 0) {
+        if (strcmp(name, s_jsFunctions[i].name) == 0) {
             JS_GETTER == funcType ? s_jsFunctions[i].gettet = fn : s_jsFunctions[i].settet = fn;
             return;
         }
     }
 
     jsFunctionInfo funcInfo;
-    strncpy(funcInfo.name, name, MAX_NAME_LENGTH - 1);
+    strcpy(funcInfo.name, name);
     funcInfo.name[MAX_NAME_LENGTH - 1] = '\0';
     JS_GETTER == funcType ? funcInfo.gettet = fn : funcInfo.settet = fn;
     JS_GETTER == funcType ? funcInfo.getterParam = param : funcInfo.setterParam = param;
@@ -1226,12 +1575,15 @@ void jsBindSetter(const char* name, jsNativeFunction fn)
 
 void wkeJsBindFunction(const char* name, wkeJsNativeFunction fn, void* param, unsigned int argCount)
 {
+    if (!name || strlen(name) > MAX_NAME_LENGTH - 1)
+        return;
+
     if (!s_jsFunctionsPtr)
         s_jsFunctionsPtr = new Vector<jsFunctionInfo>();
     Vector<jsFunctionInfo>& s_jsFunctions = *s_jsFunctionsPtr;
 
     for (unsigned int i = 0; i < s_jsFunctions.size(); ++i) {
-        if (s_jsFunctions[i].funcType == JS_FUNC && strncmp(name, s_jsFunctions[i].name, MAX_NAME_LENGTH) == 0) {
+        if (s_jsFunctions[i].funcType == JS_FUNC && strcmp(name, s_jsFunctions[i].name) == 0) {
             s_jsFunctions[i].fn = fn;
             s_jsFunctions[i].param = param;
             s_jsFunctions[i].argCount = argCount;
@@ -1240,7 +1592,7 @@ void wkeJsBindFunction(const char* name, wkeJsNativeFunction fn, void* param, un
     }
 
     jsFunctionInfo funcInfo;
-    strncpy(funcInfo.name, name, MAX_NAME_LENGTH - 1);
+    strcpy(funcInfo.name, name);
     funcInfo.name[MAX_NAME_LENGTH - 1] = '\0';
     funcInfo.fn = fn;
     funcInfo.param = param;
@@ -1262,8 +1614,8 @@ void wkeJsBindSetter(const char* name, wkeJsNativeFunction fn, void* param)
 
 jsValue js_outputMsg(jsExecState es, void* param)
 {
-    //ASSERT(jsArgCount(es) == 1);
-    //ASSERT(jsArgType(es, 0) == JSTYPE_STRING);
+    if (jsArgCount(es) != 1 || jsArgType(es, 0) != JSTYPE_STRING)
+        return jsUndefined();
 
     jsValue value = jsArg(es, 0);
     OutputDebugStringW(jsToTempStringW(es, value));
@@ -1285,60 +1637,6 @@ jsValue js_setWebViewName(jsExecState es, void* param)
 
     return jsUndefined();
 }
-
-// JSValueRef objectGetPropertyCallback(JSContextRef ctx, JSObjectRef object, JSStringRef propertyName, JSValueRef* exception)
-// {
-//     JSC::ExecState* exec = toJS(ctx);
-//     JSC::JSObject* obj = toJS(object);
-// 
-//     jsData* p = (jsData*)JSObjectGetPrivate(object);
-//     if (!p || !p->propertyGet)
-//         return false;
-// 
-//     WTF::CString str = propertyName->ustring().latin1();
-//     const char* name = str.data();
-//     jsValue ret = p->propertyGet(exec, JSC::JSValue::encode(obj), name);
-// 
-//     return toRef(exec, JSC::JSValue::decode(ret));
-// }
-// 
-// bool objectSetPropertyCallback(JSContextRef ctx, JSObjectRef object, JSStringRef propertyName, JSValueRef value, JSValueRef* exception)
-// {
-//     JSC::ExecState* exec = toJS(ctx);
-//     JSC::JSObject* obj = toJS(object);
-// 
-//     jsData* p = (jsData*)JSObjectGetPrivate(object);
-//     if (!p || !p->propertySet)
-//         return false;
-// 
-//     WTF::CString str = propertyName->ustring().latin1();
-//     const char* name = str.data();
-//     return p->propertySet(exec, JSC::JSValue::encode(obj), name, JSC::JSValue::encode(toJS(exec,value)));
-// }
-// 
-// void objectFinalize(JSObjectRef object)
-// {
-//     jsData* p = (jsData*)JSObjectGetPrivate(object);
-//     if (p && p->finalize)
-//         p->finalize(p);
-// }
-// 
-// JSValueRef objectCallAsFunctionCallback(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
-// {
-//     JSC::ExecState* exec = toJS(ctx);
-//     JSC::JSObject* obj = toJS(function);
-// 
-//     jsData* p = (jsData*)JSObjectGetPrivate(function);
-//     if (!p || !p->callAsFunction)
-//         return false;
-// 
-//     jsValue args[10] = { 0 };
-//     for (int i = 0; i < argumentCount; ++i)
-//         args[i] = JSC::JSValue::encode(toJS(exec, arguments[i]));
-// 
-//     jsValue ret = p->callAsFunction(exec, JSC::JSValue::encode(toJS(function)), args, argumentCount);
-//     return toRef(exec, JSC::JSValue::decode(ret));
-// }
 
 static void namedPropertyGetterCallback(v8::Local<v8::String> property, const v8::PropertyCallbackInfo<v8::Value>& info)
 {
@@ -1373,6 +1671,8 @@ static void namedPropertySetterCallback(v8::Local<v8::String> property, v8::Loca
     wrap->jsDataObj->propertySet(execState, object, stringWTF.utf8().data(), value);
 }
 
+void* g_testObject = nullptr;
+
 jsValue jsObject(jsExecState es, jsData* data)
 {
     if (!s_execStates || !s_execStates->contains(es) || !es || es->context.IsEmpty())
@@ -1385,28 +1685,30 @@ jsValue jsObject(jsExecState es, jsData* data)
     v8::Context::Scope contextScope(context);
     v8::Local<v8::Object> globalObj = context->Global();
 
-    v8::Local<v8::ObjectTemplate> obj = v8::ObjectTemplate::New(isolate);
+    v8::Local<v8::ObjectTemplate> objTemplate = v8::ObjectTemplate::New(isolate);
     
     NativeGetterSetterWrap* wrap = NativeGetterSetterWrap::createWrapAndAddToGlobalObjForRelease(isolate, globalObj);
 
-//     jsData* dummyData = new jsData();
-//     strcpy(dummyData->typeName, data->typeName);
-//     dummyData->propertyGet = data->propertyGet;
-//     dummyData->propertySet = data->propertySet;
-//     dummyData->finalize = data->finalize;
-//     dummyData->callAsFunction = data->callAsFunction;
     wrap->set(data);
-    obj->SetNamedPropertyHandler(namedPropertyGetterCallback, namedPropertySetterCallback, nullptr, nullptr, nullptr, v8::External::New(isolate, wrap));
 
-    jsValue retValue = createJsValueByLocalValue(isolate, context, obj->NewInstance(context).ToLocalChecked());
+    v8::Local<v8::External> external = v8::External::New(isolate, wrap);
+    objTemplate->SetNamedPropertyHandler(namedPropertyGetterCallback, namedPropertySetterCallback, nullptr, nullptr, nullptr, external);
+    
+    WkeJsValue* wkeJsValue = nullptr;
+    v8::Local<v8::Object> objInst = objTemplate->NewInstance(context).ToLocalChecked();
+
+    blink::V8HiddenValue::setHiddenValue(isolate, objInst, v8::String::NewFromUtf8(isolate, "wkeJsData", v8::NewStringType::kNormal, -1).ToLocalChecked(), external);
+
+    jsValue retValue = createJsValueByLocalValue2(isolate, context, objInst, &wkeJsValue, false);
+    wkeJsValue->value.SetWeak<NativeGetterSetterWrap>(wrap, &NativeGetterSetterWrap::firstJsObjectWeakCallback, v8::WeakCallbackType::kInternalFields);
+    wrap->set(retValue);
+
     return retValue;
 }
 
-void jsFunctionConstructCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
+void jsFunctionConstructCallback(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
     v8::Isolate* isolate = args.GetIsolate();
-//     if (!args.IsConstructCall())
-//         return;
-
     v8::Local<v8::Value> data = args.Data();
 
     NativeGetterSetterWrap* wrap = static_cast<NativeGetterSetterWrap*>(v8::External::Cast(*data)->Value());
@@ -1421,6 +1723,7 @@ void jsFunctionConstructCallback(const v8::FunctionCallbackInfo<v8::Value>& args
 
     int argsLength = args.Length();
     jsValue* argv = new jsValue[argsLength];
+
     for (int i = 0; i < argsLength; ++i)
         argv[i] = createJsValueByLocalValue(isolate, context, args[i]);
 
@@ -1463,10 +1766,22 @@ jsData* jsGetData(jsExecState es, jsValue value)
     v8::Context::Scope contextScope(context);
 
     v8::Local<v8::Value> valueV8 = getV8Value(value, context);
-    if (valueV8.IsEmpty() || !valueV8->IsExternal())
+    if (valueV8.IsEmpty())
         return nullptr;
 
-    NativeGetterSetterWrap* wrap = static_cast<NativeGetterSetterWrap*>(v8::External::Cast(*valueV8)->Value());
+    v8::Local<v8::Value> external = valueV8;
+    NativeGetterSetterWrap* wrap = nullptr;
+    if (!external->IsExternal()) {
+        if (!valueV8->IsObject())
+            return nullptr;
+
+        v8::Local<v8::Object> obj = valueV8->ToObject();
+        external = blink::V8HiddenValue::getHiddenValue(isolate, obj, v8::String::NewFromUtf8(isolate, "wkeJsData", v8::NewStringType::kNormal, -1).ToLocalChecked());
+        if (external.IsEmpty() || !external->IsExternal())
+            return nullptr;
+    }
+
+    wrap = static_cast<NativeGetterSetterWrap*>(v8::External::Cast(*external)->Value());
     ASSERT(wrap);
     return wrap->jsDataObj;
 }
@@ -1485,22 +1800,15 @@ static void setWkeWebViewToV8Context(content::WebFrameClientImpl* client, v8::Lo
     if (nameMaybeLocal.IsEmpty())
         return;
 
-#if V8_MINOR_VERSION == 7 // zero
     v8::Local<v8::Value> wkeWebViewV8 = blink::V8HiddenValue::getHiddenValue(isolate, globalObj, nameMaybeLocal.ToLocalChecked());
-#else
-    v8::Local<v8::Value> wkeWebViewV8 = globalObj->GetHiddenValue(nameMaybeLocal.ToLocalChecked());
-#endif
     ASSERT(wkeWebViewV8.IsEmpty());
 
     CWebView* wkeWebView = webPage->wkeWebView();
     ASSERT(wkeWebView);
     wkeWebViewV8 = v8::External::New(isolate, wkeWebView);
 
-#if V8_MINOR_VERSION == 7 // zero
-	blink::V8HiddenValue::setHiddenValue(isolate, globalObj, nameMaybeLocal.ToLocalChecked(), wkeWebViewV8);
-#else
-    globalObj->SetHiddenValue(nameMaybeLocal.ToLocalChecked(), wkeWebViewV8);
-#endif
+    blink::V8HiddenValue::setHiddenValue(isolate, globalObj, nameMaybeLocal.ToLocalChecked(), wkeWebViewV8);
+
 }
 
 jsExecState createTempExecStateByV8Context(v8::Local<v8::Context> context)
@@ -1513,7 +1821,19 @@ jsExecState createTempExecStateByV8Context(v8::Local<v8::Context> context)
     return execState;
 }
 
-void onCreateGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalFrame* frame, v8::Local<v8::Context> context, int extensionGroup, int worldId)
+void onCreateGlobalObjectInSubFrame(content::WebFrameClientImpl* client, blink::WebLocalFrame* frame, 
+    v8::Local<v8::Context> context, int extensionGroup, int worldId)
+{
+    content::WebPage* webPage = client->webPage();
+    CWebView* wkeWebView = webPage->wkeWebView();
+    if (!wkeWebView)
+        return;
+
+    v8::Isolate* isolate = context->GetIsolate();
+    setWkeWebViewToV8Context(client, context);
+}
+
+void onCreateGlobalObjectInMainFrame(content::WebFrameClientImpl* client, blink::WebLocalFrame* frame, v8::Local<v8::Context> context, int extensionGroup, int worldId)
 {
     content::WebPage* webPage = client->webPage();
     CWebView* wkeWebView = webPage->wkeWebView();
@@ -1530,6 +1850,9 @@ void onCreateGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalFr
 
     addFunction(context, "outputMsg", js_outputMsg, nullptr, 1);
     addAccessor(context, "webViewName", js_getWebViewName, nullptr, js_setWebViewName, nullptr);
+    
+    blink::WebScriptSource injectSource("window.chrome = {app:null, runtime:null}");
+    frame->executeScript(injectSource);
 
     v8::HandleScope handleScope(isolate);
     v8::Context::Scope contextScope(context);
@@ -1557,12 +1880,37 @@ void onCreateGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalFr
     }
 }
 
+static void deletePersistentJsValue(jsValue v)
+{
+    JsValueMap::iterator iter = findJsValueMap(v);
+    if (iter != s_jsValueMap->end()) {
+        WkeJsValue* value = iter->value;
+        RELEASE_ASSERT(WkeJsValue::wkeJsValueV8Value == value->type);
+        value->value.Reset();
+        delete value;
+    }
+    s_jsValueMap->remove(iter);
+}
+
+static void deletePersistentJsValues(CWebView* wkeWebView)
+{
+    std::set<jsValue>& persistentJsValues = wkeWebView->getPersistentJsValue();
+    for (std::set<jsValue>::iterator it = persistentJsValues.begin(); it != persistentJsValues.end(); ++it) {
+        jsValue v = *it;
+        deletePersistentJsValue(v);
+    }
+    persistentJsValues.clear();
+}
+
 void onReleaseGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalFrame* frame, v8::Local<v8::Context> context, int worldId)
 {
     content::WebPage* webPage = client->webPage();
     CWebView* wkeWebView = webPage->wkeWebView();
     if (!wkeWebView)
         return;
+
+    if (!frame->parent())
+        deletePersistentJsValues(wkeWebView);
 
     v8::Isolate* isolate = context->GetIsolate();
     v8::HandleScope handleScope(isolate);
@@ -1573,11 +1921,7 @@ void onReleaseGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalF
     if (addAccessorDataMaybeLocal.IsEmpty())
         return;
 
-#if V8_MINOR_VERSION == 7 // zero
     v8::Local<v8::Value> dataMap = blink::V8HiddenValue::getHiddenValue(isolate, globalObj, addAccessorDataMaybeLocal.ToLocalChecked());
-#else
-    v8::Local<v8::Value> dataMap = globalObj->GetHiddenValue(addAccessorDataMaybeLocal.ToLocalChecked());
-#endif
     if (dataMap.IsEmpty())
         return;
     
@@ -1587,6 +1931,19 @@ void onReleaseGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalF
         NativeGetterSetterWrap* wrap = cachedWraps->at(i);
         if (wrap->jsDataObj && wrap->jsDataObj->finalize)
             wrap->jsDataObj->finalize(wrap->jsDataObj);
+        
+        JsValueMap::iterator it = findJsValueMap(wrap->getPersistentValue());
+        if (it != s_jsValueMap->end()) {
+            WkeJsValue* wkeJsValue = it->value;
+
+            v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeJsValue->isolate, wkeJsValue->value);
+            if (value.IsEmpty() && value->IsObject()) {
+                v8::Local<v8::Object> obj = value->ToObject();
+                blink::V8HiddenValue::deleteHiddenValue(isolate, obj, v8::String::NewFromUtf8(isolate, "wkeJsData", v8::NewStringType::kNormal, -1).ToLocalChecked());
+            }
+
+            wkeJsValue->value.Reset();
+        }
         delete wrap;
     }
     cachedWraps->clear();
@@ -1609,11 +1966,24 @@ void freeV8TempObejctOnOneFrameBefore()
     if (!isMainThread() || !s_jsValueMap || AutoDisableFreeV8TempObejct::isDisable())
         return;
 
+    JsValueMap* jsValueMap = nullptr;
     for (JsValueMap::iterator it = s_jsValueMap->begin(); it != s_jsValueMap->end(); ++it) {
         WkeJsValue* value = it->value;
-        delete value;
+        if (0 == value->refCount) {
+            delete value;
+            continue;
+        }
+
+        if (!jsValueMap)
+            jsValueMap = new JsValueMap();
+        jsValueMap->add(it->key, value);
     }
-    s_jsValueMap->clear();
+
+    if (jsValueMap) {
+        delete s_jsValueMap;
+        s_jsValueMap = jsValueMap;
+    } else
+        s_jsValueMap->clear();
 
     for (Vector<jsExecState>::iterator it = s_execStates->begin(); it != s_execStates->end(); ++it) {
         jsExecState state = *it;
@@ -1621,15 +1991,7 @@ void freeV8TempObejctOnOneFrameBefore()
     } 
     s_execStates->clear();
 
-    for (size_t i = 0; i < s_sharedStringBuffers.size(); ++i) {
-        delete s_sharedStringBuffers[i];
-    }
-    s_sharedStringBuffers.clear();
-
-    for (size_t i = 0; i < s_sharedStringBuffersW.size(); ++i) {
-        delete s_sharedStringBuffersW[i];
-    }
-    s_sharedStringBuffersW.clear();
+    freeTempCharStrings();
 }
 
 jsValue createJsValueString(v8::Local<v8::Context> context, const utf8* str)
@@ -1655,7 +2017,7 @@ jsValue v8ValueToJsValue(v8::Local<v8::Context> context, v8::Local<v8::Value> v8
     } else if (v8Value->IsTrue()) {
         return jsBoolean(true);
     } else if (v8Value->IsFalse()) {
-        return jsBoolean(true);
+        return jsBoolean(false);
     } else if (v8Value->IsUndefined()) {
         return jsUndefined();
     } else if (v8Value->IsObject()) {
@@ -1674,6 +2036,71 @@ jsValue v8ValueToJsValue(v8::Local<v8::Context> context, v8::Local<v8::Value> v8
 
     return jsUndefined();
 }
+
+static void freeExceptionInfo()
+{
+    if (!g_jsExceptionInfo)
+        return;
+
+    if (g_jsExceptionInfo->message)
+        free((void*)g_jsExceptionInfo->message);
+
+    if (g_jsExceptionInfo->sourceLine)
+        free((void*)g_jsExceptionInfo->sourceLine);
+
+    if (g_jsExceptionInfo->scriptResourceName)
+        free((void*)g_jsExceptionInfo->scriptResourceName);
+
+    delete g_jsExceptionInfo;
+    g_jsExceptionInfo = nullptr;
+}
+
+void recordJsExceptionInfo(const v8::TryCatch& tryCatch)
+{
+    if (!AutoAllowRecordJsExceptionInfo::isAllow() || !tryCatch.HasCaught()) {
+        freeExceptionInfo();
+        g_jsExceptionInfo = nullptr;
+        return;
+    }
+
+    if (!g_jsExceptionInfo)
+        g_jsExceptionInfo = new jsExceptionInfo();
+
+    v8::Local<v8::Message> message = tryCatch.Message();
+
+    v8::String::Utf8Value messageUtf8(message->Get());
+    g_jsExceptionInfo->message = strDupWithLengthLimit(*messageUtf8, messageUtf8.length());
+
+    v8::String::Utf8Value sourceLineUtf8(message->GetSourceLine());
+    g_jsExceptionInfo->sourceLine = strDupWithLengthLimit(*sourceLineUtf8, sourceLineUtf8.length());
+
+    if (!message->GetScriptResourceName().IsEmpty()) {
+        v8::String::Utf8Value scriptResourceNameUtf8(message->GetScriptResourceName()->ToString());
+        g_jsExceptionInfo->scriptResourceName = strDupWithLengthLimit(*scriptResourceNameUtf8, scriptResourceNameUtf8.length());
+    } else
+        g_jsExceptionInfo->scriptResourceName = mallocEmpty();
+    g_jsExceptionInfo->lineNumber = message->GetLineNumber();
+    g_jsExceptionInfo->startPosition = message->GetStartPosition();
+    g_jsExceptionInfo->endPosition = message->GetEndPosition();
+    g_jsExceptionInfo->startColumn = message->GetStartColumn();
+    g_jsExceptionInfo->endColumn = message->GetEndColumn();
+
+    std::string* callstackString = saveCallstack(message->GetStackTrace());
+    g_jsExceptionInfo->callstackString = strDupWithLengthLimit(callstackString->c_str(), callstackString->size());
+    delete callstackString;
+}
+
+AutoAllowRecordJsExceptionInfo::AutoAllowRecordJsExceptionInfo()
+{
+    m_allowCount++;
+}
+
+AutoAllowRecordJsExceptionInfo::~AutoAllowRecordJsExceptionInfo()
+{
+    m_allowCount--;
+}
+
+int AutoAllowRecordJsExceptionInfo::m_allowCount = 0;
 
 };
 

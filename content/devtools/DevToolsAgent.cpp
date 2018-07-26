@@ -16,6 +16,7 @@
 #include "third_party/WebKit/public/platform/WebTraceLocation.h"
 #include "third_party/WebKit/public/platform/Platform.h"
 #include "third_party/WebKit/Source/bindings/core/v8/V8RecursionScope.h"
+#include "gen/blink/platform/RuntimeEnabledFeatures.h"
 #include <v8.h>
 
 namespace content {
@@ -214,7 +215,10 @@ blink::WebDevToolsAgentClient::WebKitClientMessageLoop* DevToolsAgent::createCli
 
 void DevToolsAgent::willEnterDebugLoopInRun()
 {
-    CheckReEnter::s_kEnterContent--;
+    if (blink::RuntimeEnabledFeatures::updataInOtherThreadEnabled()) {
+        RELEASE_ASSERT(0 == CheckReEnter::getEnterCount());
+    } else
+        CheckReEnter::decrementEnterCount();
     blink::ThreadState* threadState = blink::ThreadState::current();
     threadState->enterGCForbiddenScope();
 
@@ -231,7 +235,11 @@ void DevToolsAgent::didExitDebugLoopInRun()
     m_page->didExitDebugLoop();
     m_devToolsClient->didExitDebugLoop();
 
-    CheckReEnter::s_kEnterContent++;
+    if (blink::RuntimeEnabledFeatures::updataInOtherThreadEnabled()) {
+        RELEASE_ASSERT(0 == CheckReEnter::getEnterCount());
+    } else {
+        CheckReEnter::incrementEnterCount();
+    }
 }
 
 void DevToolsAgent::willEnterDebugLoop()

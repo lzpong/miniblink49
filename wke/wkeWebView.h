@@ -10,6 +10,7 @@
 #include "third_party/WebKit/Source/platform/geometry/IntRect.h"
 #include "net/WebURLLoaderManager.h"
 #include <map>
+#include <set>
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -34,6 +35,9 @@ struct CWebViewHandler {
 
     wkePaintUpdatedCallback paintUpdatedCallback;
     void* paintUpdatedCallbackParam;
+
+    wkePaintBitUpdatedCallback paintBitUpdatedCallback;
+    void* paintBitUpdatedCallbackParam;
 
     wkeAlertBoxCallback alertBoxCallback;
     void* alertBoxCallbackParam;
@@ -83,6 +87,9 @@ struct CWebViewHandler {
     wkeWillReleaseScriptContextCallback willReleaseScriptContextCallback;
     void* willReleaseScriptContextCallbackParam;
 
+    wkeOnOtherLoadCallback otherLoadCallback;
+    void* otherLoadCallbackParam;
+
     wkeWindowClosingCallback windowClosingCallback;
     void* windowClosingCallbackParam;
     
@@ -92,9 +99,10 @@ struct CWebViewHandler {
     wkeDraggableRegionsChangedCallback draggableRegionsChangedCallback;
     void* draggableRegionsChangedCallbackParam;
 
+    wkeStartDraggingCallback startDraggingCallback;
+    void* startDraggingCallbackParam;
     
-
-    bool isWke;//是否是使用的wke接口
+    bool isWke; // 是否是使用的wke接口
 };
 
 class CWebView : public IWebView {
@@ -121,6 +129,7 @@ public:
     void loadPostURL(const wchar_t * inUrl,const char * poastData,int nLen);
 
     void loadHTML(const utf8* html) override;
+    void loadHtmlWithBaseUrl(const utf8* html, const utf8* baseUrl);
     void loadHTML(const wchar_t* html) override;
 
     void loadFile(const utf8* filename) override;
@@ -130,7 +139,7 @@ public:
 
 	  void setUserAgent(const utf8 * useragent);
     void setUserAgent(const wchar_t * useragent);
-
+    
     bool isLoading() const;
     bool isLoadingSucceeded() const;
     bool isLoadingFailed() const;
@@ -138,6 +147,8 @@ public:
     virtual bool isDocumentReady() const override;
     void stopLoading();
     void reload();
+    void goToOffset(int offset);
+    void goToIndex(int index);
 
     const utf8* title() override;
     const wchar_t* titleW() override;
@@ -209,6 +220,7 @@ public:
     jsValue runJS(const utf8* script) override;
     jsValue runJsInFrame(wkeWebFrameHandle frameId, const utf8* script, bool isInClosure);
     jsExecState globalExec() override;
+    jsExecState globalExecByFrame(wkeWebFrameHandle frameId);
     
     void sleep() override;
     void wake() override;
@@ -227,6 +239,7 @@ public:
     void onTitleChanged(wkeTitleChangedCallback callback, void* callbackParam);
     void onMouseOverUrlChanged(wkeTitleChangedCallback callback, void* callbackParam);
     virtual void onPaintUpdated(wkePaintUpdatedCallback callback, void* callbackParam);
+    void onPaintBitUpdated(wkePaintBitUpdatedCallback callback, void* callbackParam);
 
     void onAlertBox(wkeAlertBoxCallback callback, void* callbackParam);
     void onConfirmBox(wkeConfirmBoxCallback callback, void* callbackParam);
@@ -249,6 +262,10 @@ public:
     void onDidCreateScriptContext(wkeDidCreateScriptContextCallback callback, void* callbackParam);
     void onWillReleaseScriptContext(wkeWillReleaseScriptContextCallback callback, void* callbackParam);
 
+    void onStartDragging(wkeStartDraggingCallback callback, void* callbackParam);
+    
+    void onOtherLoad(wkeOnOtherLoadCallback callback, void* callbackParam);
+
     void onDraggableRegionsChanged(wkeDraggableRegionsChangedCallback callback, void* param);
 
     void setClientHandler(const wkeClientHandler* handler) override;
@@ -268,11 +285,17 @@ public:
     void setNetInterface(const char* netInterface);
     String getNetInterface() const { return m_netInterface; }
 
-    void setProxyInfo(const String& host, unsigned long port, net::WebURLLoaderManager::ProxyType type, const String& username, const String& password);
+    void setProxyInfo(const String& host, unsigned long port, net::ProxyType type, const String& username, const String& password);
     String getProxy() const { return m_proxy; }
-    net::WebURLLoaderManager::ProxyType getProxyType() const { return m_proxyType; }
+    net::ProxyType getProxyType() const { return m_proxyType; }
 
-    void showDevTools(const utf8* url);
+    void showDevTools(const utf8* url, wkeOnShowDevtoolsCallback callback, void* param);
+
+    content::WebPage* getWebPage() const { return m_webPage; }
+
+    std::set<jsValue>& getPersistentJsValue() { return m_persistentJsValue; }
+
+    int getId() const { return m_id; }
 
 protected:
     friend class ShowDevToolsTaskObserver;
@@ -285,6 +308,9 @@ protected:
     void _loadURL(const utf8* inUrl, bool isFile);
 
     std::map<std::string, void*> m_userKeyValues;
+    std::set<jsValue> m_persistentJsValue;
+
+    int m_id;
 
     //按理这些接口应该使用CWebView来实现的，可以把它们想像成一个类，因此设置为友员符合情理。
 //     friend class ToolTip;
@@ -323,7 +349,7 @@ protected:
     String m_netInterface;
 
     String m_proxy;
-    net::WebURLLoaderManager::ProxyType m_proxyType;
+    net::ProxyType m_proxyType;
 
     friend class ShowDevToolsTaskObserver;
     bool m_isCreatedDevTools;

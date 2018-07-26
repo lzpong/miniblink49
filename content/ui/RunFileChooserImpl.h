@@ -62,7 +62,8 @@ static Vector<char> getMimeType(const WebString& mime)
         return Vector<char>();
 
     WebMimeRegistryImpl* mimeRegistry = (WebMimeRegistryImpl*)blink::Platform::current()->mimeRegistry();
-    mimeType = mimeRegistry->extensionFormimeType(mime);
+    Vector<blink::WebString> mimeTypes = mimeRegistry->extensionsForMimeType(mime);
+
     if (mimeType.isNull() || mimeType.isEmpty()) {
         mimeType = mime;
         if (mimeType[0] == '.')
@@ -72,39 +73,32 @@ static Vector<char> getMimeType(const WebString& mime)
     return mimeTypeBuf;
 }
 
+static void addForExtensions(const Vector<blink::WebString>& exts, const String& description, std::vector<char>* filter)
+{
+    appendStringToVector(filter, description.utf8().data());
+    filter->push_back('\0');
+
+    for (Vector<blink::WebString>::const_iterator it = exts.begin(); it != exts.end(); ++it) {
+        std::string str = "*.";
+        str += it->utf8().data();
+        appendStringToVector(filter, str);
+        filter->push_back(';');
+    }
+    filter->push_back('\0');
+}
+
 static bool runFileChooserImpl(const blink::WebFileChooserParams& params, blink::WebFileChooserCompletion* completion)
 {
+    // image/gif, image/jpeg, image/*
+    // Image Files(*.txt)\0*.gif;*.jpeg;*.png\0All Files(*.*)\0*.*\0\0
     std::vector<char> filter;
-    if (0 != params.acceptTypes.size()) {
-        if (1 == params.acceptTypes.size()) {
-            String mimeType = params.acceptTypes[0];
-            Vector<char> mimeTypeBuf = getMimeType(mimeType);
-            appendStringToVector(&filter, mimeTypeBuf);
-            filter.push_back('\0');
-            appendStringToVector(&filter, "*.");
-            appendStringToVector(&filter, /*extentionForMimeType*/(mimeTypeBuf));
-        } else {
-            appendStringToVector(&filter, "Custom Types");
-            filter.push_back('\0');
-            for (size_t i = 0; i < params.acceptTypes.size(); ++i) {
-                if (0 != i)
-                    filter.push_back(';');
-                appendStringToVector(&filter, "*.");
-                String mimeType = params.acceptTypes[i];
-                Vector<char> mimeTypeBuf = getMimeType(mimeType);
-                appendStringToVector(&filter, /*extentionForMimeType*/(mimeTypeBuf));
-            }
-            for (size_t i = 0; i < params.acceptTypes.size(); ++i) {
-                filter.push_back('\0');
-                String mimeType = params.acceptTypes[i];
-                Vector<char> mimeTypeBuf = getMimeType(mimeType);
-                appendStringToVector(&filter, mimeTypeBuf);
-                filter.push_back('\0');
-                appendStringToVector(&filter, "*.");
-                appendStringToVector(&filter, /*extentionForMimeType*/(mimeTypeBuf));
-            }
-        }
-        filter.push_back('\0');
+    
+    for (size_t i = 0; i < params.acceptTypes.size(); ++i) {
+        String mimeType = params.acceptTypes[i];
+
+        WebMimeRegistryImpl* mimeRegistry = (WebMimeRegistryImpl*)blink::Platform::current()->mimeRegistry();
+        Vector<blink::WebString> exts = mimeRegistry->extensionsForMimeType(mimeType);
+        addForExtensions(exts, mimeType, &filter);
     }
 
     appendStringToVector(&filter, "All Files");
@@ -197,8 +191,12 @@ static bool runFileChooserImpl(const blink::WebFileChooserParams& params, blink:
         info.displayName = blink::Platform::current()->fileUtilities()->baseName(info.path);
         const std::wstring& fileSystemURL = L"file:///" + filePath;
         info.fileSystemURL = blink::KURL(blink::ParsedURLString, String(fileSystemURL.c_str()));
+
+        long long fileSizeResult = 0;
+        if (!getFileSize(filePath.c_str(), fileSizeResult))
+            fileSizeResult = 0;
         info.modificationTime = 0;
-        info.length = 0;
+        info.length = fileSizeResult;
         info.isDirectory = ::PathIsDirectoryW(filePath.c_str());
 
         wsFileNames[i] = info;

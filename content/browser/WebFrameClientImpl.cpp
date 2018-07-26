@@ -36,6 +36,12 @@
 #include "third_party/WebKit/Source/wtf/text/WTFStringUtil.h"
 #include "net/RequestExtraData.h"
 
+#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
+namespace wke {
+class CWebView;
+}
+#endif
+
 namespace content {
 
 WebFrameClientImpl::WebFrameClientImpl()
@@ -141,10 +147,38 @@ blink::WebPluginPlaceholder* WebFrameClientImpl::createPluginPlaceholder(WebLoca
 
 blink::WebPlugin* WebFrameClientImpl::createPlugin(WebLocalFrame* frame, const WebPluginParams& params)
 {
-    PassRefPtr<WebPluginImpl> plugin = adoptRef(new WebPluginImpl(frame, params));
-    plugin->setParentPlatformWidget(m_webPage->getHWND());
+    WebPluginParams newParam = params;
+    Vector<String> paramNames;
+    Vector<String> paramValues;
+
+    bool isWmode = false;
+    for (size_t i = 0; i < newParam.attributeNames.size(); i++) {
+        if (String(newParam.attributeNames[i]).lower() == "wmode") {
+            isWmode = true;
+
+            paramNames.append(newParam.attributeNames[i]);
+            if (String(newParam.attributeValues[i]).lower() != "opaque" &&
+                String(newParam.attributeValues[i]).lower() != "transparent") {
+                paramValues.append("opaque");
+            } else
+                paramValues.append(newParam.attributeValues[i]);
+        } else {
+            paramNames.append(newParam.attributeNames[i]);
+            paramValues.append(newParam.attributeValues[i]);
+        }
+    }
+    if (!isWmode) {
+        paramNames.append("wmode");
+        paramValues.append("opaque");
+    }
+
+    newParam.attributeNames = WebVector<WebString>(paramNames);
+    newParam.attributeValues = WebVector<WebString>(paramValues);  
+
+    PassRefPtr<WebPluginImpl> plugin = adoptRef(new WebPluginImpl(frame, newParam));
+    plugin->setParentPlatformPluginWidget(m_webPage->getHWND());
     plugin->setHwndRenderOffset(m_webPage->getHwndRenderOffset());
-    plugin->setWebViewClient(m_webPage->webViewImpl()->client());
+    plugin->setWkeWebView(m_webPage->wkeWebView());
     return plugin.leakRef();
 }
 
@@ -166,13 +200,24 @@ blink::WebWorkerContentSettingsClientProxy* WebFrameClientImpl::createWorkerCont
 
 // Create a new WebPopupMenu. In the "createExternalPopupMenu" form, the
 // client is responsible for rendering the contents of the popup menu.
-WebExternalPopupMenu* WebFrameClientImpl::createExternalPopupMenu(const WebPopupMenuInfo&, WebExternalPopupMenuClient*) {
+WebExternalPopupMenu* WebFrameClientImpl::createExternalPopupMenu(const WebPopupMenuInfo&, WebExternalPopupMenuClient*)
+{
     return 0;
 }
 
 WebCookieJar* WebFrameClientImpl::cookieJar(WebLocalFrame*)
 {
     return WebCookieJarImpl::inst();
+}
+
+void WebFrameClientImpl::resetLoadState()
+{
+    m_loadFailed = false;
+    m_loaded = false;
+    m_documentReady = false;
+    m_loading = true;
+
+    //OutputDebugStringA("WebFrameClientImpl::resetLoadState\n");
 }
 
 void WebFrameClientImpl::onLoadingStateChange(bool isLoading, bool toDifferentDocument)
@@ -203,6 +248,7 @@ void WebFrameClientImpl::onLoadingStateChange(bool isLoading, bool toDifferentDo
 
 void WebFrameClientImpl::didStartLoading(bool toDifferentDocument)
 {
+    resetLoadState();
     onLoadingStateChange(true, toDifferentDocument);
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     wke::AutoDisableFreeV8TempObejct autoDisableFreeV8TempObejct;
@@ -234,6 +280,8 @@ void WebFrameClientImpl::didCreateDataSource(WebLocalFrame*, WebDataSource*) { }
 
 void WebFrameClientImpl::didStartProvisionalLoad(WebLocalFrame* localFrame, double triggeringEventTime)
 {
+    resetLoadState();
+
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
     CefBrowserHostImpl* browser = m_webPage->browser();
     if (browser)
@@ -278,7 +326,8 @@ static wkeWebFrameHandle frameIdToWkeFrame(WebPage* webPage, WebLocalFrame* fram
 
 void WebFrameClientImpl::didCommitProvisionalLoad(WebLocalFrame* frame, const WebHistoryItem& history, WebHistoryCommitType type)
 {
-    m_webPage->didCommitProvisionalLoad(frame, history, type, true);
+    if (!frame->parent())
+        m_webPage->didCommitProvisionalLoad(frame, history, type, false);
 
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
     CefBrowserHostImpl* browser = m_webPage->browser();
@@ -404,7 +453,6 @@ void WebFrameClientImpl::didFinishLoad(WebLocalFrame* frame)
     wke::CWebViewHandler& handler = m_webPage->wkeHandler();
     if (handler.loadingFinishCallback) {
         wkeLoadingResult result = WKE_LOADING_SUCCEEDED;
-        //blink::WebFrame* webFrame = m_webPage->mainFrame();
         wke::CString url(frame->document().url().string());
 
         wkeTempCallbackInfo* tempInfo = wkeGetTempCallbackInfo(m_webPage->wkeWebView());
@@ -418,12 +466,8 @@ void WebFrameClientImpl::didFinishLoad(WebLocalFrame* frame)
 }
 
 void WebFrameClientImpl::didNavigateWithinPage(WebLocalFrame* frame, const WebHistoryItem& history, WebHistoryCommitType type)
-{
-    //     cef_load_handler_t* loadHandler = m_cefBrowserHostImpl->m_browserImpl->m_loadHandler;
-    //     m_cefBrowserHostImpl->m_browserImpl->ref();
-    //     loadHandler->on_loading_state_change(loadHandler, &m_cefBrowserHostImpl->m_browserImpl->m_baseClass, false, false, false);
-    
-    m_webPage->didCommitProvisionalLoad(frame, history, type, false);
+{    
+    m_webPage->didCommitProvisionalLoad(frame, history, type, true);
 
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     wke::AutoDisableFreeV8TempObejct autoDisableFreeV8TempObejct;
@@ -734,9 +778,13 @@ void WebFrameClientImpl::clearContextMenu()
 
 void WebFrameClientImpl::didCreateScriptContext(WebLocalFrame* frame, v8::Local<v8::Context> context, int extensionGroup, int worldId)
 {
+    v8::V8::SetCaptureStackTraceForUncaughtExceptions(true, 50, v8::StackTrace::kDetailed);
+
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     if (frame->top() == frame)
-        wke::onCreateGlobalObject(this, frame, context, extensionGroup, worldId);
+        wke::onCreateGlobalObjectInMainFrame(this, frame, context, extensionGroup, worldId);
+    else
+        wke::onCreateGlobalObjectInSubFrame(this, frame, context, extensionGroup, worldId);
 
     wke::AutoDisableFreeV8TempObejct autoDisableFreeV8TempObejct;
     if (m_webPage->wkeHandler().didCreateScriptContextCallback)
@@ -774,6 +822,7 @@ void WebFrameClientImpl::willReleaseScriptContext(WebLocalFrame* frame, v8::Loca
         m_webPage->wkeHandler().willReleaseScriptContextCallback(m_webPage->wkeWebView(), m_webPage->wkeHandler().willReleaseScriptContextCallbackParam,
             frameIdToWkeFrame(m_webPage, frame), &context, worldId);
 #endif
+
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
     if (!CefContentClient::Get())
         return;

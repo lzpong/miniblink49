@@ -75,6 +75,8 @@ public:
 
     void gc();
 
+    void didRunCreateDevToolsAgentTaskObserver();
+
     DevToolsAgent* createOrGetDevToolsAgent();
     DevToolsClient* createOrGetDevToolsClient();
     
@@ -88,6 +90,7 @@ public:
     virtual blink::WebWidget* createPopupMenu(blink::WebPopupType) override;
     virtual blink::WebStorageNamespace* createSessionStorageNamespace() override;
     virtual blink::WebString acceptLanguages() override;
+    void setScreenInfo(const blink::WebScreenInfo& info);
     virtual blink::WebScreenInfo screenInfo() override;
     virtual void setMouseOverURL(const blink::WebURL&) override;
     virtual void setToolTipText(const blink::WebString&, blink::WebTextDirection hint) override;
@@ -118,6 +121,11 @@ public:
     // PopupMenuWinClient --------------------------------------------------------
     virtual void onPopupMenuCreate(HWND hWnd) override;
     virtual void onPopupMenuHide() override;
+
+    // Dialogs -------------------------------------------------------------
+    virtual void showValidationMessage(const blink::WebRect& anchorInViewport, const blink::WebString& mainText, blink::WebTextDirection mainTextDir, const blink::WebString& supplementalText, blink::WebTextDirection supplementalTextDir) override;
+    virtual void hideValidationMessage() override;
+    virtual void moveValidationMessage(const blink::WebRect& anchorInViewport) override;
     
     void testPaint();
 
@@ -164,6 +172,7 @@ public:
     virtual void paintToMemoryCanvasInUiThread(SkCanvas* canvas, const blink::IntRect& paintRect) override;
     
     cc::LayerTreeHost* layerTreeHost() { return m_layerTreeHost; }
+    void setDrawMinInterval(double drawMinInterval);
 
     void loadHistoryItem(int64 frameId, const blink::WebHistoryItem& item, blink::WebHistoryLoadType type, blink::WebURLRequest::CachePolicy policy);
     void loadURL(int64 frameId, const wchar_t* url, const blink::Referrer& referrer, const wchar_t* extraHeaders);
@@ -179,6 +188,7 @@ public:
     virtual void navigateBackForwardSoon(int offset) override;
     virtual int historyBackListCount() override;
     virtual int historyForwardListCount() override;
+    void navigateToIndex(int index);
 
     static WebPageImpl* getSelfForCurrentContext();
 
@@ -188,6 +198,7 @@ public:
     void setBrowser(CefBrowserHostImpl* browser);
 #endif
     blink::WebFrame* getWebFrameFromFrameId(int64_t frameId);
+    int64_t getFrameIdByBlinkFrame(const blink::WebFrame* frame);
     static int64_t getFirstFrameId();
 
     blink::WebView* createWkeView(blink::WebLocalFrame* creator,
@@ -206,17 +217,33 @@ public:
     virtual bool runFileChooser(const blink::WebFileChooserParams& params, blink::WebFileChooserCompletion* completion) override;
 
     // ----
+    bool needDrawToScreen(HWND hWnd) const;
+    void drawLayeredWindow(HWND hWnd, SkCanvas* canvas, HDC hdc, const blink::IntRect& paintRect, HDC hMemoryDC) const;
+
     void executeMainFrame();
+    friend class AutoRecordActions;
+    int m_autoRecordActionsCount;
+    bool m_runningInMouseMessage;
 
     void copyToMemoryCanvasForUi();
 
-    friend class AutoRecordActions;
+    void handleMouseWhenDraging(UINT message);
+    void onEnterDragSimulate();
+    void onLeaveDragSimulate();
+    void onDraggingSimulate();
+    bool m_isDragging;
+    bool m_isFirstEnterDrag;
 
     static int64_t m_firstFrameId;
 
+    blink::WebThread::TaskObserver* m_createDevToolsAgentTaskObserver;
+
     ToolTip* m_toolTip;
+    ToolTip* m_validationMessageTip;
 
     blink::IntRect m_winodwRect;
+
+    bool n_needAutoDrawToHwnd;
 
     bool m_postMouseLeave; // 系统的MouseLeave获取到的鼠标位置不太准确，自己在定时器里再抛一次
     blink::RGBA32 m_bdColor;
@@ -287,6 +314,8 @@ public:
     bool m_isEnterDebugLoop;
 
     DragHandle* m_dragHandle;
+
+    blink::WebScreenInfo* m_screenInfo;
 };
 
 } // blink

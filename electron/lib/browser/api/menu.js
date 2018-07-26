@@ -18,9 +18,13 @@ Menu.prototype._init = function () {
 	});
 }
 
-Menu.prototype.popup = function (windowObj, x, y, positioningItem) {
+Menu.prototype.popup = function (options) {
+	// windowObj, x, y, positioningItem
     this._init();
-	this._popup();
+    if (options && ('x' in options) && 'y' in options)
+		this._popup(options.x, options.y);
+	else
+		this._popup();
 }
 
 Menu.prototype.append = function (item) {
@@ -34,6 +38,11 @@ Menu.prototype.insert = function (pos, item) {
     this._init();
     this._insert(pos, item);
     this.items.splice(pos, 0, item)
+}
+
+Menu.prototype.clear = function () {
+    this.items = [];
+    this._clear();
 }
 
 Menu.buildFromTemplate = function (template) {
@@ -75,52 +84,50 @@ Menu.buildFromTemplate = function (template) {
     return menu;
 }
 
-
 // Returns the index of where to insert the item according to |position|.
 var indexToInsertByPosition = function (items, position) {
-  var insertIndex;
-  if (!position) {
-    return items.length;
-  }
-  //const [query, id] = position.split('=');
-  const positionSplit = position.split('=');
-  const query = positionSplit[0];
-  const id = positionSplit[1];
-  
-  insertIndex = indexOfItemById(items, id);
-  if (insertIndex === -1 && query !== 'endof') {
-    console.warn("Item with id '" + id + "' is not found");
-    return items.length;
-  }
-  switch (query) {
-    case 'after':
-      insertIndex++;
-      break
-    case 'endof':
+    var insertIndex;
+    if (!position) {
+        return items.length;
+    }
+    const positionSplit = position.split('=');
+    const query = positionSplit[0];
+    const id = positionSplit[1];
 
-      // If the |id| doesn't exist, then create a new group with the |id|.
-      if (insertIndex === -1) {
-        items.push({
-          id: id,
-          type: 'separator'
-        })
-        insertIndex = items.length - 1;
-      }
+    insertIndex = indexOfItemById(items, id);
+    if (insertIndex === -1 && query !== 'endof') {
+        console.warn("Item with id '" + id + "' is not found");
+        return items.length;
+    }
+    switch (query) {
+        case 'after':
+            insertIndex++;
+            break
+        case 'endof':
 
-      // Find the end of the group.
-      insertIndex++;
-      while (insertIndex < items.length && items[insertIndex].type !== 'separator') {
-        insertIndex++;
-      }
-  }
-  return insertIndex;
-}
+            // If the |id| doesn't exist, then create a new group with the |id|.
+            if (insertIndex === -1) {
+                items.push({
+                    id: id,
+                    type: 'separator'
+                })
+                insertIndex = items.length - 1;
+            }
 
-Menu.getApplicationMenu = function () {
-    return null;
+            // Find the end of the group.
+            insertIndex++;
+            while (insertIndex < items.length && items[insertIndex].type !== 'separator') {
+                insertIndex++;
+            }
+    }
+    return insertIndex;
 }
 
 var applicationMenu = null;
+Menu.getApplicationMenu = function () {
+    return applicationMenu;
+}
+
 Menu.setApplicationMenu = function (menu) {
 	if (!(menu === null || menu.constructor === Menu)) {
 		throw new TypeError('Invalid menu');

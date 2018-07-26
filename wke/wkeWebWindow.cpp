@@ -12,6 +12,8 @@ namespace wke {
 
 CWebWindow::CWebWindow()
 {
+    m_state = kWkeWebWindowUninit;
+
     m_originalPaintUpdatedCallback = NULL;
     m_originalPaintUpdatedCallbackParam = NULL;
 
@@ -153,10 +155,12 @@ bool CWebWindow::_createWindow(HWND parent, unsigned styles, unsigned styleEx, i
 
 void CWebWindow::_destroyWindow()
 {
+    if (kWkeWebWindowDestroing == m_state)
+        return;
+    m_state = kWkeWebWindowDestroing;
+
     ::KillTimer(m_hWnd, (UINT_PTR)this);
-    ::RemovePropW(m_hWnd, L"wkeWebWindow");
-    ::DestroyWindow(m_hWnd);
-    m_hWnd = NULL;
+    ::DestroyWindow(m_hWnd); // 这里会重入到本函数
 }
 
 void CWebWindow::_initCallbacks()
@@ -174,6 +178,7 @@ LRESULT CALLBACK CWebWindow::_staticWindowProc(HWND hwnd, UINT message, WPARAM w
             LPCREATESTRUCTW cs = (LPCREATESTRUCTW)lParam;
             pthis = (CWebWindow*)cs->lpCreateParams;
             ((CWebWindow*)cs->lpCreateParams)->setHandle(hwnd);
+            pthis->m_state = kWkeWebWindowInit;
             ::SetPropW(hwnd, L"wkeWebWindow", (HANDLE)pthis);
         }
     }
@@ -187,6 +192,12 @@ LRESULT CALLBACK CWebWindow::_staticWindowProc(HWND hwnd, UINT message, WPARAM w
 LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch(message) {
+    case WM_NCPAINT:
+        break;
+
+    case WM_ERASEBKGND:
+        break;
+
     case WM_CREATE:
         ::DragAcceptFiles(hwnd, TRUE);
         SetTimer(hwnd, (UINT_PTR)this, 20, NULL);
@@ -202,7 +213,7 @@ LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         ::DestroyWindow(hwnd);
         return 0;
 
-    case WM_DESTROY:
+    case WM_NCDESTROY:
         ::KillTimer(hwnd, (UINT_PTR)this);
         ::RemovePropW(hwnd, L"wkeWebWindow");
         m_hWnd = NULL;
@@ -242,9 +253,6 @@ LRESULT CWebWindow::_windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             ::EndPaint(hwnd, &ps);
         }
         break;
-
-    case WM_ERASEBKGND:
-        return 0;
 
     case WM_SIZE: {
         RECT rc = { 0 };

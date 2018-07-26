@@ -33,7 +33,8 @@ public:
 
     static void initialize();
 
-    void startGarbageCollectedThread(double delayMs);
+    void setGcTimer(double intervalSec);
+    void setResGcTimer(double intervalSec);
    
     virtual void cryptographicallyRandomValues(unsigned char* buffer, size_t length) override;
 
@@ -57,11 +58,12 @@ public:
     virtual double systemTraceTime() override;
 
     virtual blink::WebString userAgent() override;
-    void setUserAgent(char* ua);
+    static const char* getUserAgent();
+    void setUserAgent(const char* ua);
 
-    virtual blink::WebData BlinkPlatformImpl::loadResource(const char* name) override;
+    virtual blink::WebData loadResource(const char* name) override;
 
-    virtual blink::WebThemeEngine* BlinkPlatformImpl::themeEngine() override;
+    virtual blink::WebThemeEngine* themeEngine() override;
 
     virtual blink::WebMimeRegistry* mimeRegistry() override;
 
@@ -106,7 +108,7 @@ public:
     virtual blink::WebClipboard* clipboard() override;
 
     // Plugin --------------------------------------------------------------
-    void BlinkPlatformImpl::getPluginList(bool refresh, blink::WebPluginListBuilder* builder) override;
+    void getPluginList(bool refresh, blink::WebPluginListBuilder* builder) override;
 
     // fileUtilities -------------------------------------------------------
     virtual blink::WebFileUtilities* fileUtilities() override;
@@ -124,11 +126,24 @@ public:
     blink::WebThread* ioThread();
     void doGarbageCollected();
 
+    //////////////////////////////////////////////////////////////////////////
+    virtual size_t numberOfProcessors() override;
+    void setNumberOfProcessors(size_t num);
+
+    //////////////////////////////////////////////////////////////////////////
+    class AutoDisableGC {
+    public:
+        AutoDisableGC();
+        ~AutoDisableGC();
+    };
+
 private:
     void destroyWebInfo();
     void closeThread();
+    void resourceGarbageCollectedTimer(blink::Timer<BlinkPlatformImpl>*);
     void garbageCollectedTimer(blink::Timer<BlinkPlatformImpl>*);
     void perfTimer(blink::Timer<BlinkPlatformImpl>*);
+    bool m_isDisableGC;
 
     CRITICAL_SECTION* m_lock;
     static const int m_maxThreadNum = 1000;
@@ -136,7 +151,9 @@ private:
     int m_threadNum;
 
     blink::Timer<BlinkPlatformImpl>* m_gcTimer;
+    blink::Timer<BlinkPlatformImpl>* m_defaultGcTimer;
     blink::Timer<BlinkPlatformImpl>* m_perfTimer;
+    blink::Timer<BlinkPlatformImpl>* m_resTimer; // 资源单独一个定时器
 
     blink::WebThread* m_ioThread;
 
@@ -155,6 +172,8 @@ private:
     double m_firstMonotonicallyIncreasingTime;
 
     WTF::String* m_userAgent;
+
+    size_t m_numberOfProcessors;
 };
 
 } // namespace content

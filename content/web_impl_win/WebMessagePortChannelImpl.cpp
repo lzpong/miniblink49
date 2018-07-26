@@ -21,15 +21,16 @@ WebMessagePortChannelImpl::WebMessagePortChannelImpl(
     PlatformMessagePortChannel::MessagePortQueue* outgoing)
     : m_channel((PlatformMessagePortChannel::create(incoming, outgoing).leakPtr()))
 {
-    String output = String::format("WebMessagePortChannelImpl::WebMessagePortChannelImpl: %p\n", this);
-    OutputDebugStringA(output.utf8().data());
+//     String output = String::format("WebMessagePortChannelImpl::WebMessagePortChannelImpl: %p\n", this);
+//     OutputDebugStringA(output.utf8().data());
 
     m_keepAlive = this;
 }
 
 WebMessagePortChannelImpl::~WebMessagePortChannelImpl()
 {
-    ;
+//     String output = String::format("WebMessagePortChannelImpl::~WebMessagePortChannelImpl: %p\n", this);
+//     OutputDebugStringA(output.utf8().data());
 }
 
 void WebMessagePortChannelImpl::setClient(blink::WebMessagePortChannelClient* client)
@@ -38,8 +39,8 @@ void WebMessagePortChannelImpl::setClient(blink::WebMessagePortChannelClient* cl
     // Must lock here since m_client is called on the main thread.
     m_channel->setRemotePort(client);
 
-    String output = String::format("WebMessagePortChannelImpl::setClient: this:%p, MessagePort:%p\n", this, m_channel->m_remotePort);
-    OutputDebugStringA(output.utf8().data());
+//     String output = String::format("WebMessagePortChannelImpl::setClient: this:%p, MessagePort:%p\n", this, m_channel->m_remotePort);
+//     OutputDebugStringA(output.utf8().data());
 }
 
 void WebMessagePortChannelImpl::destroy()
@@ -66,8 +67,8 @@ void WebMessagePortChannelImpl::postMessage(const blink::WebString& message, bli
     bool wasEmpty = m_channel->m_outgoingQueue->appendAndCheckEmpty(WTF::adoptPtr(new PlatformMessagePortChannel::EventData(serializedValue, WTF::adoptPtr(channels))));
     if (wasEmpty && m_channel->m_entangledChannel && m_channel->m_entangledChannel->m_remotePort) {
 
-        String output = String::format("WebMessagePortChannelImpl::postMessage: this:%p, MessagePort:%p\n", this, m_channel->m_remotePort);
-        OutputDebugStringA(output.utf8().data());
+//         String output = String::format("WebMessagePortChannelImpl::postMessage: this:%p, MessagePort:%p\n", this, m_channel->m_remotePort);
+//         OutputDebugStringA(output.utf8().data());
 
         m_channel->m_entangledChannel->m_remotePort->messageAvailable();
     }

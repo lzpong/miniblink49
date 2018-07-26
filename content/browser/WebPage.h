@@ -67,6 +67,8 @@ public:
 
     void onDocumentReady();
 
+    void setNeedAutoDrawToHwnd(bool b);
+
     static void connetDevTools(WebPage* frontEnd, WebPage* embedder);
     bool isDevtoolsConneted() const;
     void inspectElementAt(int x, int y);
@@ -104,6 +106,8 @@ public:
 
     void setIsDraggableRegionNcHitTest();
 
+    void setDrawMinInterval(double drawMinInterval);
+
     void setNeedsCommit();
     bool needsCommit() const;
     bool isDrawDirty() const;
@@ -118,6 +122,9 @@ public:
     void goBack();
     bool canGoForward();
     void goForward();
+    void goToOffset(int offset);
+    void goToIndex(int index);
+
     void didCommitProvisionalLoad(blink::WebLocalFrame* frame,
         const blink::WebHistoryItem& history, blink::WebHistoryCommitType type, bool isSameDocument);
 
@@ -133,6 +140,9 @@ public:
     void didExitDebugLoop();
 
     void didStartProvisionalLoad();
+
+    void setScreenInfo(const blink::WebScreenInfo& info);
+    blink::WebScreenInfo screenInfo();
 
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
     CefBrowserHostImpl* browser();

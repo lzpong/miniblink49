@@ -30,6 +30,7 @@
 
 #include "net/MultipartHandle.h"
 #include "net/SharedMemoryDataConsumerHandle.h"
+#include "net/CancelledReason.h"
 #include "third_party/WebKit/public/platform/WebURLLoader.h"
 #include "third_party/WebKit/public/platform/WebURLResponse.h"
 #include "third_party/WebKit/public/platform/WebURLError.h"
@@ -66,6 +67,7 @@ namespace net {
 class WebURLLoaderManagerMainTask;
 class WebURLLoaderManager;
 class FlattenHTTPBodyElementStream;
+struct InitializeHandleInfo;
 
 class WebURLLoaderInternal {
 public:
@@ -77,26 +79,26 @@ public:
     void ref() { atomicIncrement(&m_ref); }
     void deref() { atomicDecrement(&m_ref); }
 
-    int m_ref;
-    int m_id;
-    bool m_isSynchronous;
-
-    blink::WebURLRequest* m_firstRequest;
-
     WebURLLoaderClient* client() { return m_client; }
-    WebURLLoaderClient* m_client;
 
-    void setResponseFired(bool responseFired)
-    {
-        m_responseFired = responseFired;
-    }
-
+    void setResponseFired(bool responseFired) { m_responseFired = responseFired; }
     bool responseFired() { return m_responseFired; }
 
     WebURLLoaderImplCurl* loader() { return m_loader; }
     void setLoader(WebURLLoaderImplCurl* loader) { m_loader = loader; }
 
     blink::WebURLRequest* firstRequest() { return m_firstRequest; }
+
+    bool isCancelled() const { return kNoCancelled != m_cancelledReason; }
+
+public:
+    int m_ref;
+    int m_id;
+
+    WebURLLoaderClient* m_client;
+    bool m_isSynchronous;
+
+    blink::WebURLRequest* m_firstRequest;
 
     String m_lastHTTPMethod;
 
@@ -118,11 +120,10 @@ public:
     struct curl_slist* m_customHeaders;
     WebURLResponse m_response;
     OwnPtr<MultipartHandle> m_multipartHandle;
-    bool m_cancelled;
+
+    CancelledReason m_cancelledReason;
 
     FlattenHTTPBodyElementStream* m_formDataStream;
-//     WTF::Vector<FlattenHTTPBodyElement*> m_postBytes;
-//     size_t m_postBytesReadOffset;
 
     enum FailureType {
         NoFailure,
@@ -155,13 +156,13 @@ public:
     bool m_isProxy;
     bool m_isProxyHeadRequest;
 
-#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
-    bool m_isHookRequest;
-    void* m_hookBuf;
-    int m_hookLength;
+    InitializeHandleInfo* m_initializeHandleInfo;
+    bool m_isHoldJobToAsynCommit;
 
-    void* m_asynWkeNetSetData;
-    int m_asynWkeNetSetDataLength;
+#if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
+    int m_isHookRequest; // 1表示wke接口设置的，2表示内部指定要缓存，3表示既是内部指定，又被缓存了
+    Vector<char>* m_hookBufForEndHook;
+    Vector<char>* m_asynWkeNetSetData;
     bool m_isWkeNetSetDataBeSetted;
 #endif
 };

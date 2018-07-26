@@ -1,5 +1,5 @@
 ﻿
-#include "node/include/nodeblink.h"
+#include "node/nodeblink.h"
 #include "common/NodeRegisterHelp.h"
 #include "common/StringUtil.h"
 #include "common/api/EventEmitter.h"
@@ -52,11 +52,11 @@ public:
 
     // showSaveDialog([browserWindow, ]options[, callback])
     void _showSaveDialogApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
-        _showOpenOrSaveDialogApi(true, args);
+        _showOpenOrSaveDialogApi(false, args);
     }
 
     void _showOpenDialogApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
-        _showOpenOrSaveDialogApi(false, args);
+        _showOpenOrSaveDialogApi(true, args);
     }
 
     // showOpenDialog([browserWindow, ]options[, callback])

@@ -90,10 +90,10 @@ void WebPage::setViewportSize(const IntSize& size)
     m_pageImpl->setViewportSize(size);
 }
 
-// LocalFrame* WebPage::localFrame()
-// {
-//     return m_pageImpl->m_webViewImpl->mainFrameImpl()->frame();
-// }
+void WebPage::setNeedAutoDrawToHwnd(bool b)
+{
+    m_pageImpl->n_needAutoDrawToHwnd = b;
+}
 
 IntRect WebPage::caretRect()
 {
@@ -106,6 +106,12 @@ IntRect WebPage::caretRect()
 void WebPage::setIsDraggableRegionNcHitTest()
 {
     //m_pageImpl->m_isDraggableRegionNcHitTest = true;
+}
+
+void WebPage::setDrawMinInterval(double drawMinInterval)
+{
+    if (m_pageImpl)
+        m_pageImpl->setDrawMinInterval(drawMinInterval);
 }
 
 void WebPage::setNeedsCommit()
@@ -434,6 +440,18 @@ void WebPage::goForward()
         m_pageImpl->navigateBackForwardSoon(1);
 }
 
+void WebPage::goToOffset(int offset)
+{
+    if (m_pageImpl)
+        m_pageImpl->navigateBackForwardSoon(offset);
+}
+
+void WebPage::goToIndex(int index)
+{
+    if (m_pageImpl)
+        m_pageImpl->navigateToIndex(index);
+}
+
 void WebPage::didCommitProvisionalLoad(blink::WebLocalFrame* frame, const blink::WebHistoryItem& history, 
     blink::WebHistoryCommitType type, bool isSameDocument)
 {
@@ -445,6 +463,19 @@ void WebPage::setTransparent(bool transparent)
 {
     if (m_pageImpl)
         m_pageImpl->setTransparent(transparent);
+}
+
+void WebPage::setScreenInfo(const blink::WebScreenInfo& info)
+{
+    if (m_pageImpl)
+        m_pageImpl->setScreenInfo(info);
+}
+
+blink::WebScreenInfo WebPage::screenInfo()
+{
+    if (m_pageImpl)
+        return m_pageImpl->screenInfo();
+    return blink::WebScreenInfo();
 }
 
 WebPage* WebPage::getSelfForCurrentContext()
@@ -488,16 +519,11 @@ WebFrame* WebPage::getWebFrameFromFrameId(int64_t frameId)
     return m_pageImpl->getWebFrameFromFrameId(frameId);
 }
 
-
 int64_t WebPage::getFrameIdByBlinkFrame(const blink::WebFrame* frame)
 {
-    if (!frame)
+    if (!m_pageImpl)
         return content::WebPage::kInvalidFrameId;
-
-    blink::Frame* blinkFrame = blink::toCoreFrame(frame);
-    if (!blinkFrame)
-        return content::WebPage::kInvalidFrameId;
-    return blinkFrame->frameID();
+    return m_pageImpl->getFrameIdByBlinkFrame(frame);
 }
 
 int64_t WebPage::getFirstFrameId()

@@ -158,11 +158,23 @@ public:
 
     bool isDrawDirty();
     void paintToBit(void* bits, int pitch);
+
+    struct BitInfo {
+        uint32_t* pixels;
+        SkCanvas* tempCanvas;
+        int width;
+        int height;
+    };
+    BitInfo* getBitBegin();
+    void getBitEnd(const BitInfo* bitInfo);
+
     void requestDrawFrameToRunIntoCompositeThread();
     void requestApplyActionsToRunIntoCompositeThread(bool needCheck);
     //void setUseLayeredBuffer(bool b);
     //bool getIsUseLayeredBuffer() const { return m_useLayeredBuffer; }
     static void clearCanvas(SkCanvas* canvas, const SkRect& rect, bool useLayeredBuffer);
+
+    void setDrawMinInterval(double drawMinInterval);
     
     void postPaintMessage(const SkRect& paintRect);
     void firePaintEvent(HDC hdc, const RECT* paintRect);
@@ -235,6 +247,7 @@ private:
     double m_lastCompositeTime;
     double m_lastPaintTime;
     mutable double m_lastRecordTime;
+    double m_drawMinInterval;
 
     static const int m_paintMessageQueueSize = 200;
     Vector<SkRect> m_dirtyRectsForComposite;
