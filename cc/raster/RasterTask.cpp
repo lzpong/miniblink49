@@ -42,13 +42,9 @@
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/WebKit/Source/platform/image-encoders/gdiplus/GDIPlusImageEncoder.h"
+#include "wke/wkeGlobalVar.h"
 
 extern DWORD g_rasterTaskCount;
-extern float g_contentScale;
-
-namespace blink {
-bool saveDumpFile(const String& url, char* buffer, unsigned int size);
-}
 
 namespace content {
 extern int debugPaint;
@@ -188,7 +184,7 @@ public:
         , m_blendAction(blendAction)
         , m_group(group)
         , m_filterOperations(filterOperations ? new cc_blink::WebFilterOperationsImpl(*filterOperations) : nullptr)
-        , m_contentScale(g_contentScale)
+        , m_contentScale(wke::g_contentScale)
     {
 #ifndef NDEBUG
         rasterTaskCounter.increment();
@@ -295,11 +291,11 @@ public:
         m_blendAction->setDirtyRectBitmap(bitmap);
         m_blendAction->setContentScale(m_contentScale);
 
-        if (0) {
-            Vector<unsigned char> output;
-            blink::GDIPlusImageEncoder::encode(*bitmap, blink::GDIPlusImageEncoder::PNG, &output);
-            blink::saveDumpFile("E:\\mycode\\miniblink49\\trunk\\out\\1.png", (char*)output.data(), output.size());
-        }
+//         if (0) {
+//             Vector<unsigned char> output;
+//             blink::GDIPlusImageEncoder::encode(*bitmap, blink::GDIPlusImageEncoder::PNG, &output);
+//             blink::saveDumpFile("E:\\mycode\\miniblink49\\trunk\\out\\1.png", (char*)output.data(), output.size());
+//         }
 #endif
     }
 

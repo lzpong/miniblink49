@@ -1,4 +1,4 @@
-
+﻿
 #ifndef net_WebURLLoaderManagerMainTask_h
 #define net_WebURLLoaderManagerMainTask_h
 
@@ -7,16 +7,16 @@
 #include "net/WebURLLoaderManagerAsynTask.h"
 #include "net/RequestExtraData.h"
 #include "content/browser/WebPage.h"
+#include "third_party/WebKit/Source/wtf/Threading.h"
 #include "third_party/WebKit/Source/platform/network/HTTPParsers.h"
 #include "third_party/WebKit/public/platform/Platform.h"
 #include "third_party/WebKit/public/platform/WebScheduler.h"
 #include "third_party/WebKit/public/web/WebLocalFrame.h"
-#include "third_party/WebKit/Source/wtf/Threading.h"
 #include "wke/wkeWebView.h"
 
 namespace net {
 
-// �ص���main�̵߳�task
+// 回调回main线程的task
 class WebURLLoaderManagerMainTask : public blink::WebThread::Task{
 public:
     enum TaskType {
@@ -434,7 +434,7 @@ static void distpatchWkeWillSendRequest(WebURLLoaderInternal* job, const KURL* n
     }
 }
 
-static bool doRedirect(WebURLLoaderInternal* job, const String& location, WebURLLoaderManagerMainTask::Args* args)
+static void doRedirect(WebURLLoaderInternal* job, const String& location, WebURLLoaderManagerMainTask::Args* args, bool isRedirectByHttpCode)
 {
     WebURLLoaderClient* client = job->client();
     KURL newURL = KURL((KURL)(job->firstRequest()->url()), location);
@@ -454,8 +454,7 @@ static bool doRedirect(WebURLLoaderInternal* job, const String& location, WebURL
 
             if (job->m_isWkeNetSetDataBeSetted)
                 Platform::current()->currentThread()->scheduler()->postLoadingTask(FROM_HERE, new WkeAsynTask(WebURLLoaderManager::sharedInstance(), job->m_id));
-
-            return false;
+            return;
         }
     }
 #endif
@@ -465,11 +464,11 @@ static bool doRedirect(WebURLLoaderInternal* job, const String& location, WebURL
     if (client && job->loader())
         client->willSendRequest(job->loader(), *redirectedRequest, job->m_response);
 
-    job->m_response.initialize();
+    if (isRedirectByHttpCode)
+        job->m_response.initialize();
 
     delete job->m_firstRequest;
     job->m_firstRequest = redirectedRequest;
-    return false;
 }
 
 static bool setHttpResponseDataToJobWhenDidReceiveResponseOnMainThread(WebURLLoaderInternal* job, WebURLLoaderManagerMainTask::Args* args)
@@ -496,7 +495,11 @@ static bool setHttpResponseDataToJobWhenDidReceiveResponseOnMainThread(WebURLLoa
     job->m_response.setURL(KURL(ParsedURLString, args->hdr));
     job->m_response.setHTTPStatusCode(args->httpCode);
     job->m_response.setMIMEType(extractMIMETypeFromMediaType(contentType).lower());
-    job->m_response.setTextEncodingName(extractCharsetFromMediaType(contentType));
+
+    String textEncodingName = extractCharsetFromMediaType(contentType);
+//     if (textEncodingName.isNull() || textEncodingName.isEmpty())
+//         textEncodingName = "utf-8";
+    job->m_response.setTextEncodingName(textEncodingName);
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     if (dispatchResponseToWke(job, contentType))
         return false;
@@ -508,11 +511,26 @@ static bool setHttpResponseDataToJobWhenDidReceiveResponseOnMainThread(WebURLLoa
             job->m_multipartHandle = adoptPtr(new MultipartHandle(job, boundary));
     }
 
-    // HTTP redirection �ض���
-    if (isHttpRedirect(args->httpCode)) {
+    if (job->m_effectiveUrl.empty())
+        job->m_effectiveUrl = args->hdr;
+
+    bool isRedirectByHttpCode = isHttpRedirect(args->httpCode);
+    bool isRedirectByUrl = (!job->m_effectiveUrl.empty() && job->m_effectiveUrl != job->m_url); // 有时有代理时，url会变，但没有30x码
+
+    job->m_effectiveUrl = args->hdr;
+
+    // HTTP redirection 重定向
+    if (isRedirectByHttpCode || isRedirectByUrl) {
         String location = job->m_response.httpHeaderField(WebString::fromUTF8("location"));
+
+        if (isRedirectByUrl)
+            OutputDebugStringA("isRedirectByUrl! \n");
+
         if (!location.isEmpty()) {
-            return doRedirect(job, location, args);
+            doRedirect(job, location, args, isRedirectByHttpCode);
+            if (isRedirectByHttpCode)
+                return false;
+            return true;
         }
     } else if (isHttpAuthentication(args->httpCode)) {
 

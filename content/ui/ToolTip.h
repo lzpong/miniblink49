@@ -1,12 +1,12 @@
-#ifndef content_browser_ToolTip_h
+ï»¿#ifndef content_browser_ToolTip_h
 #define content_browser_ToolTip_h
 
+#include "wke/wkeGlobalVar.h"
 #include "third_party/WebKit/Source/platform/Timer.h"
 #include <windows.h>
 #include <xstring>
 
 typedef void (*TipPaintCallback) (HWND hWnd, HDC hdc, const wchar_t * text, size_t textLength);
-extern void* g_tipPaintCallback;
 
 namespace content {
 
@@ -36,7 +36,7 @@ public:
 
         m_hFont = CreateFont(18, 0, 0, 0, FW_THIN, FALSE, FALSE, FALSE,
             GB2312_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Î¢ÈíÑÅºÚ");
+            DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"å¾®è½¯é›…é»‘");
     }
 
     ~ToolTip()
@@ -124,8 +124,8 @@ public:
 
     void onPaint(HWND hWnd, HDC hdc)
     {
-        if (g_tipPaintCallback) {
-            TipPaintCallback fun = (TipPaintCallback)g_tipPaintCallback;
+        if (wke::g_tipPaintCallback) {
+            TipPaintCallback fun = (TipPaintCallback)wke::g_tipPaintCallback;
             fun(hWnd, hdc, m_text.c_str(), m_text.size());
             return;
         }

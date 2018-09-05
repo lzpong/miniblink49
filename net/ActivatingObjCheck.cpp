@@ -57,7 +57,7 @@ bool ActivatingObjCheck::isActivating(intptr_t loader)
 
 int ActivatingObjCheck::genId()
 {
-    InterlockedIncrement((unsigned int *)&m_newestId);
+    InterlockedIncrement((long *)&m_newestId);
     return m_newestId;
 }
 
@@ -78,9 +78,10 @@ void ActivatingObjCheck::doGarbageCollected(bool forceGC)
 {
     if (!forceGC) {
         ::EnterCriticalSection(&m_mutex);
-        if (m_activatingObjs->size() < 10)
-            return;
+        int size = m_activatingObjs->size();
         ::LeaveCriticalSection(&m_mutex);
+        if (size < 10)
+            return;
     }
 
     ::EnterCriticalSection(&m_mutex);

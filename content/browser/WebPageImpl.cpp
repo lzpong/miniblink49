@@ -1,5 +1,4 @@
-﻿
-#include "content/browser/WebPageImpl.h"
+﻿#include "content/browser/WebPageImpl.h"
 
 #include "base/basictypes.h"
 #include "base/rand_util.h"
@@ -69,8 +68,9 @@
 #endif
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
 #include "wke/wkeWebView.h"
-#include "wke/wkeJsBindFreeTempObject.h"
+#include "wke/wkeUtil.h"
 #include "wke/wkeWebWindow.h"
+#include "wke/wkeGlobalVar.h"
 #endif
 #include "skia/ext/bitmap_platform_device_win.h"
 
@@ -142,6 +142,8 @@ WebPageImpl::WebPageImpl()
     m_devToolsClient = nullptr;
     m_devToolsAgent = nullptr;
     m_isEnterDebugLoop = false;
+    m_draggableRegion = ::CreateRectRgn(0, 0, 0, 0); // Create a HRGN representing the draggable window area.
+    m_pageNetExtraData = nullptr;
 
     WebPageImpl* self = this;
     m_dragHandle = new DragHandle(
@@ -580,10 +582,15 @@ void WebPageImpl::doClose()
 #endif
 
 
-    if (m_hWnd)
-        ::RevokeDragDrop(m_hWnd);
+    if (m_hWnd) {
+        if (::IsWindow(m_hWnd)) {
+            ::RevokeDragDrop(m_hWnd);
+            ASSERT(0 == m_dragHandle->getRefCount());
+        } else {
+            ASSERT(1 == m_dragHandle->getRefCount());
+        }
+    }
 
-    ASSERT(0 == m_dragHandle->getRefCount());
     delete m_dragHandle;
     m_dragHandle = nullptr;
 
@@ -1036,13 +1043,13 @@ void WebPageImpl::drawLayeredWindow(HWND hWnd, SkCanvas* canvas, HDC hdc, const 
     ::DeleteDC(hdcMemory);
 }
 
-// 本函数可能被调用在ui线程，也可以是合成线程
+// 本函数可能被调用在ui线程，也可以是合成线程。开启多线程绘制，则在合成线程
 void WebPageImpl::paintToMemoryCanvasInUiThread(SkCanvas* canvas, const IntRect& paintRect)
 {
     if (m_disablePaint)
         return;
 
-    if (0 == m_firstDrawCount && !canPaintToScreen(m_webViewImpl)) { }
+    //if (0 == m_firstDrawCount && !canPaintToScreen(m_webViewImpl)) { }
     ++m_firstDrawCount;
 
     HWND hWnd = m_pagePtr->getHWND();
@@ -1120,14 +1127,18 @@ void WebPageImpl::setDrawMinInterval(double drawMinInterval)
         m_layerTreeHost->setDrawMinInterval(drawMinInterval);
 }
 
-void WebPageImpl::repaintRequested(const IntRect& windowRect)
+void WebPageImpl::repaintRequested(const IntRect& windowRect, bool forceRepaintIfEmptyRect)
 {
     freeV8TempObejctOnOneFrameBefore();
-    if (pageInited != m_state || windowRect.isEmpty() || windowRect.maxY() < 0 || windowRect.maxX() < 0)
+    IntRect r = windowRect;
+    if (forceRepaintIfEmptyRect && r.isEmpty())
+        r = m_layerTreeHost->getClientRect();
+
+    if (pageInited != m_state || r.isEmpty() || r.maxY() < 0 || r.maxX() < 0)
         return;
 
     if (m_layerTreeHost)
-        m_layerTreeHost->postPaintMessage(windowRect);
+        m_layerTreeHost->postPaintMessage(r);
     setNeedsCommitAndNotLayout();
 }
 
@@ -1137,7 +1148,7 @@ void WebPageImpl::didInvalidateRect(const WebRect& r)
     IntRect windowRect(r);
     if (-1 == windowRect.width() || -1 == windowRect.height())
         windowRect = m_layerTreeHost->getClientRect();
-    repaintRequested(windowRect);
+    repaintRequested(windowRect, false);
 }
 
 // Called when the Widget has changed size as a result of an auto-resize.
@@ -1184,7 +1195,7 @@ void WebPageImpl::didChangeCursor(const WebCursorInfo& cursor)
     m_cursor = cursor;
 
     if (m_hWnd)
-        ::PostMessage(m_hWnd, WM_SETCURSOR, 0, 0);
+        ::PostMessage(m_hWnd, WM_SETCURSOR, (WPARAM)m_hWnd, MAKELONG(HTCLIENT, 0)); // COleControl::OnSetCursor
 }
 
 int WebPageImpl::getCursorInfoType() const
@@ -1414,6 +1425,13 @@ void WebPageImpl::handleMouseWhenDraging(UINT message)
             m_isFirstEnterDrag = true;
         } else
             m_dragHandle->DragOver(0, pt, &pdwEffect);
+
+        blink::WebDragOperation op = DragHandle::dragCursorTodragOperation(pdwEffect);
+        blink::WebCursorInfo cursor;
+        cursor.type = blink::WebCursorInfo::TypeNoDrop;
+        if (blink::WebDragOperationNone != op)
+            cursor.type = blink::WebCursorInfo::TypeHand;
+        didChangeCursor(cursor);
     } else if (WM_LBUTTONUP == message) {
         m_isFirstEnterDrag = false;
         m_dragHandle->Drop(m_dragHandle->getDragData(), 0, pt, &pdwEffect);
@@ -1448,11 +1466,17 @@ static void initWkeWebDragDataItem(wkeWebDragData::Item* item)
     item->filenameData = nullptr; // wkeCreateStringW(L"", 0);
     item->displayNameData = nullptr; // wkeCreateStringW(L"", 0);
     item->binaryData = nullptr;
-    item->binaryDataLength = 0;
     item->title = nullptr; // wkeCreateStringW(L"", 0);
     item->fileSystemURL = nullptr; // wkeCreateStringW(L"", 0);
     item->fileSystemFileSize = 0;
     item->baseURL = nullptr; // wkeCreateStringW(L"", 0);
+}
+
+static void freeUtf8String(wkeMemBuf* str)
+{
+    if (!str)
+        return;
+    wkeFreeMemBuf(str);
 }
 
 static void destroyWkeDragData(wkeWebDragData* data)
@@ -1462,16 +1486,28 @@ static void destroyWkeDragData(wkeWebDragData* data)
         wkeWebDragData::Item* it = items + i;
 
         if (wkeWebDragData::Item::StorageTypeFilename == it->storageType) {
-            wkeDeleteString(it->filenameData);
+            freeUtf8String(it->filenameData);
         } else if (wkeWebDragData::Item::StorageTypeFileSystemFile == it->storageType) {
-            wkeDeleteString(it->fileSystemURL);
+            freeUtf8String(it->fileSystemURL);
         } else if (wkeWebDragData::Item::StorageTypeString == it->storageType) {
-            wkeDeleteString(it->stringType);
-            wkeDeleteString(it->stringData);
+            freeUtf8String(it->stringType);
+            freeUtf8String(it->stringData);
         }
     }
     delete items;
     delete data;
+}
+
+static wkeMemBuf* createUtf8String(const char* str, size_t len)
+{
+    if (!str)
+        return nullptr;
+//     char* result = new char[len + 1];
+//     strncpy(result, str, len);
+//     result[len - 1] = '\0';
+//     return result;
+
+    return wkeCreateMemBuf(nullptr, (void*)str, len);
 }
 
 static wkeWebDragData* webDropDataToWkeDragData(const blink::WebDragData& data)
@@ -1493,21 +1529,21 @@ static wkeWebDragData* webDropDataToWkeDragData(const blink::WebDragData& data)
             result->m_itemList[i].storageType = wkeWebDragData::Item::StorageTypeFilename;
 
             std::string fileName = item.filenameData.utf8();
-            result->m_itemList[i].filenameData = wkeCreateString(fileName.c_str(), fileName.size());
+            result->m_itemList[i].filenameData = createUtf8String(fileName.c_str(), fileName.size());
             
         } else if (blink::WebDragData::Item::StorageTypeFileSystemFile == item.storageType) {
             result->m_itemList[i].storageType = wkeWebDragData::Item::StorageTypeFileSystemFile;
 
             blink::KURL fileSystemURL = item.fileSystemURL;
             String fileSystemURLString = fileSystemURL.getUTF8String();
-            result->m_itemList[i].fileSystemURL = wkeCreateString((const utf8*)fileSystemURLString.characters8(), fileSystemURLString.length());
+            result->m_itemList[i].fileSystemURL = createUtf8String((const utf8*)fileSystemURLString.characters8(), fileSystemURLString.length());
         } else if (blink::WebDragData::Item::StorageTypeString == item.storageType) {
             result->m_itemList[i].storageType = wkeWebDragData::Item::StorageTypeString;
 
             std::string stringType = item.stringType.utf8();
-            result->m_itemList[i].stringType = wkeCreateString(stringType.c_str(), stringType.size());
+            result->m_itemList[i].stringType = createUtf8String(stringType.c_str(), stringType.size());
             std::string stringData = item.stringData.utf8();
-            result->m_itemList[i].stringData = wkeCreateString(stringData.c_str(), stringData.size());
+            result->m_itemList[i].stringData = createUtf8String(stringData.c_str(), stringData.size());
         }
     }
 
@@ -1518,6 +1554,7 @@ void WebPageImpl::startDragging(blink::WebLocalFrame* frame, const blink::WebDra
     blink::WebDragOperationsMask mask, const blink::WebImage& image, const blink::WebPoint& dragImageOffset)
 {
     BlinkPlatformImpl::AutoDisableGC autoDisableGC;
+
     wkeStartDraggingCallback callback = m_pagePtr->wkeHandler().startDraggingCallback;
     if (!callback) {
         m_dragHandle->startDragging(frame, data, mask, image, dragImageOffset);
@@ -1528,9 +1565,16 @@ void WebPageImpl::startDragging(blink::WebLocalFrame* frame, const blink::WebDra
     wkePoint offset = { dragImageOffset.x, dragImageOffset.y };
 
     wkeWebDragData* dragDate = webDropDataToWkeDragData(data);
+
+    onEnterDragSimulate();
+    CheckReEnter::decrementEnterCount();
+
     callback(m_pagePtr->wkeWebView(), param,
         wke::CWebView::frameIdTowkeWebFrameHandle(m_pagePtr, getFrameIdByBlinkFrame(frame)),
         dragDate, (wkeWebDragOperationsMask)mask, nullptr, &offset);
+
+    CheckReEnter::incrementEnterCount();
+    onLeaveDragSimulate();
 
     destroyWkeDragData(dragDate);
 }
@@ -1597,10 +1641,122 @@ void WebPageImpl::setTransparent(bool transparent)
     m_webViewImpl->setBaseBackgroundColor(cc::getRealColor(transparent, cc::s_kBgColor));
 }
 
+struct RegisterDragDropTask {
+    RegisterDragDropTask(int id, HWND hWnd, DragHandle* dragHandle)
+    {
+        m_id = id;
+        m_hWnd = hWnd;
+        m_dragHandle = dragHandle;
+    }
+
+    static void registerDragDropInUiThread(HWND hWnd, void* param)
+    {
+        ::OleInitialize(nullptr);
+
+        RegisterDragDropTask* self = (RegisterDragDropTask*)param;
+
+        do {
+            if (!wkeIsWebviewAlive(self->m_id))
+                break;
+            ::RegisterDragDrop(self->m_hWnd, self->m_dragHandle);
+        } while (false);
+
+        delete self;
+    }
+
+private:
+    int m_id;
+    HWND m_hWnd;
+    DragHandle* m_dragHandle;
+};
+
+struct PostTaskWrap {
+    PostTaskWrap(HWND hWnd, wkeUiThreadRunCallback callback, void* param)
+    {
+        m_hWnd = hWnd;
+        m_callback = callback;
+        m_param = param;
+    }
+
+    static void init()
+    {
+        if (wke::g_wkeUiThreadPostTaskCallback)
+            return;
+        wke::g_wkeUiThreadPostTaskCallback = PostTaskWrap::uiThreadPostTaskCallback;
+
+        m_uiPostTasks = new std::vector<PostTaskWrap*>();
+        ::InitializeCriticalSection(&m_uiPostTasksMutex);
+    }
+
+    WTF::String getProp() const { return m_prop; }
+
+    static void WINAPI timerProc(HWND hWnd, UINT message, UINT_PTR iTimerID, DWORD dwTime)
+    {
+        ::KillTimer(hWnd, kPostTaskTimerId);
+        
+        ::EnterCriticalSection(&m_uiPostTasksMutex);
+        std::vector<PostTaskWrap*>* tasksToRun = new std::vector<PostTaskWrap*>();
+        std::vector<PostTaskWrap*>* tasksToSave = new std::vector<PostTaskWrap*>();
+
+        for (size_t i = 0; i < m_uiPostTasks->size(); ++i) {
+            PostTaskWrap* task = m_uiPostTasks->at(i);
+            if (task->m_hWnd == hWnd)
+                tasksToRun->push_back(task);
+            else
+                tasksToSave->push_back(task);
+        }
+        delete m_uiPostTasks;
+        m_uiPostTasks = tasksToSave;
+        ::LeaveCriticalSection(&m_uiPostTasksMutex);
+
+        for (size_t i = 0; i < tasksToRun->size(); ++i) {
+            PostTaskWrap* task = tasksToRun->at(i);
+            task->m_callback(task->m_hWnd, task->m_param);
+            delete task;
+        }
+    }
+
+    static int uiThreadPostTaskCallback(HWND hWnd, wkeUiThreadRunCallback callback, void* param)
+    {
+        PostTaskWrap* task = new PostTaskWrap(hWnd, callback, param);
+
+        ::EnterCriticalSection(&m_uiPostTasksMutex);
+        m_uiPostTasks->push_back(task);
+        ::LeaveCriticalSection(&m_uiPostTasksMutex);
+
+        ::SetTimer(hWnd, kPostTaskTimerId, 10, &timerProc);
+        return 1;
+    }
+
+private:
+    HWND m_hWnd;
+    wkeUiThreadRunCallback m_callback;
+    void* m_param;
+    WTF::String m_prop;
+
+    static const int kPostTaskTimerId = 0x15324546;
+    static std::vector<PostTaskWrap*>* m_uiPostTasks;
+    static CRITICAL_SECTION m_uiPostTasksMutex;
+};
+std::vector<PostTaskWrap*>* PostTaskWrap::m_uiPostTasks = nullptr;
+CRITICAL_SECTION PostTaskWrap::m_uiPostTasksMutex;
+
 void WebPageImpl::setHWND(HWND hWnd)
 {
     m_hWnd = hWnd;
-    if (m_hWnd && !blink::RuntimeEnabledFeatures::updataInOtherThreadEnabled()) {
+    if (!m_hWnd)
+        return;
+
+    DWORD processID;
+    DWORD threadID;
+    threadID = ::GetWindowThreadProcessId(hWnd, &processID);
+    if (threadID != ::GetCurrentThreadId())
+        PostTaskWrap::init();
+    
+    if (wke::g_wkeUiThreadPostTaskCallback) {
+        m_dragHandle->setViewWindow(m_hWnd, m_webViewImpl);
+        wke::g_wkeUiThreadPostTaskCallback(m_hWnd, RegisterDragDropTask::registerDragDropInUiThread, new RegisterDragDropTask(m_pagePtr->wkeWebView()->getId(), m_hWnd, m_dragHandle));
+    } else if (!blink::RuntimeEnabledFeatures::updataInOtherThreadEnabled()) {
         m_dragHandle->setViewWindow(m_hWnd, m_webViewImpl);
         ::RegisterDragDrop(m_hWnd, m_dragHandle);
     }
@@ -1698,7 +1854,14 @@ WebStorageNamespace* WebPageImpl::createSessionStorageNamespace()
 
 WebString WebPageImpl::acceptLanguages()
 {
-    return WebString::fromUTF8("zh-CN,zh");
+    if (m_webViewImpl) {
+        blink::Page *page = m_webViewImpl->page();
+        if (page) {
+            blink::Settings &setings = page->settings();
+            return setings.language();
+        }
+    }
+    return WebString::fromUTF8("zh-CN,cn");
 }
 
 void WebPageImpl::setScreenInfo(const WebScreenInfo& info)
@@ -1741,6 +1904,12 @@ void WebPageImpl::setMouseOverURL(const blink::WebURL& url)
 void WebPageImpl::setToolTipText(const blink::WebString& toolTip, blink::WebTextDirection hint)
 {
     m_toolTip->show(WTF::ensureUTF16UChar((String)toolTip, true).data(), nullptr);
+}
+
+void WebPageImpl::onMouseDown(const blink::WebNode& mouseDownNode)
+{
+    if (mouseDownNode.isDraggable())
+        m_platformEventHandler->setIsDraggableNodeMousedown();
 }
 
 void WebPageImpl::draggableRegionsChanged()
@@ -1853,6 +2022,13 @@ void WebPageImpl::didExitDebugLoop()
 
     if (m_devToolsClient)
         m_webViewImpl->setIgnoreInputEvents(true);
+}
+
+void WebPageImpl::setCookieJarPath(const char* path)
+{
+    if (!m_pageNetExtraData)
+        m_pageNetExtraData = new net::PageNetExtraData();
+    m_pageNetExtraData->setCookieJarPath(path);
 }
 
 bool WebPageImpl::initSetting()

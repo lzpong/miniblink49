@@ -2,6 +2,8 @@
 #ifndef content_WebPage_h
 #define content_WebPage_h
 
+#include "content/browser/WebPageState.h"
+
 #include "third_party/WebKit/Source/platform/geometry/IntSize.h"
 #include "third_party/WebKit/Source/platform/geometry/IntPoint.h"
 #include "third_party/WebKit/Source/platform/geometry/IntRect.h"
@@ -9,6 +11,7 @@
 #include "third_party/WebKit/public/web/WebViewClient.h"
 #include "third_party/WebKit/public/web/WebHistoryCommitType.h"
 #include "third_party/WebKit/Source/wtf/HashSet.h"
+#include "net/PageNetExtraData.h"
 
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
 class CefBrowserHostImpl;
@@ -58,6 +61,8 @@ public:
     WebPage(void* foreignPtr);
     ~WebPage();
 
+    WebPageState getState() const;
+
     bool init(HWND hWnd);
 
     void close();
@@ -102,7 +107,7 @@ public:
 
     blink::IntRect caretRect();
 
-    void repaintRequested(const blink::IntRect& windowRect);
+    void repaintRequested(const blink::IntRect& windowRect, bool forceRepaintIfEmptyRect);
 
     void setIsDraggableRegionNcHitTest();
 
@@ -150,9 +155,13 @@ public:
 #endif
 
     blink::WebViewImpl* webViewImpl();
+    WebPageImpl* webPageImpl();
     blink::WebFrame* mainFrame();
 
     static WebPage* getSelfForCurrentContext();
+
+    PassRefPtr<net::PageNetExtraData> getPageNetExtraData();
+    void setCookieJarPath(const char* path);
 
     WebFrameClientImpl* webFrameClientImpl();
 

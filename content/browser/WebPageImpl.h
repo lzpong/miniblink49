@@ -1,6 +1,9 @@
 ﻿#ifndef WebPageImpl_h
 #define WebPageImpl_h
 
+#include "content/browser/WebPageState.h"
+#include "content/ui/PopupMenuWinClient.h"
+
 #include "base/rand_util.h"
 
 #include "third_party/WebKit/public/web/WebViewClient.h"
@@ -11,8 +14,9 @@
 #include "cc/trees/LayerTreeHost.h"
 #include "cc/trees/LayerTreeHostClient.h"
 #include "skia/ext/platform_canvas.h"
+#include "net/PageNetExtraData.h"
 
-#include "content/ui/PopupMenuWinClient.h"
+typedef struct HWND__ *HWND;
 
 namespace cc {
 class LayerTreeHost;
@@ -32,6 +36,10 @@ class WebViewImpl;
 #if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
 class CefBrowserHostImpl;
 #endif
+
+namespace net {
+class PageNetExtraData;
+}
 
 namespace content {
 
@@ -95,6 +103,7 @@ public:
     virtual void setMouseOverURL(const blink::WebURL&) override;
     virtual void setToolTipText(const blink::WebString&, blink::WebTextDirection hint) override;
     virtual void draggableRegionsChanged() override;
+    virtual void onMouseDown(const blink::WebNode& mouseDownNode) override;
 
     // Editing --------------------------------------------------------
     virtual bool handleCurrentKeyboardEvent() override;
@@ -131,7 +140,7 @@ public:
 
     void beginMainFrame();
     
-    void repaintRequested(const blink::IntRect& windowRect);
+    void repaintRequested(const blink::IntRect& windowRect, bool forceRepaintIfEmptyRect);
 
     void freeV8TempObejctOnOneFrameBefore();
 
@@ -234,6 +243,9 @@ public:
     bool m_isDragging;
     bool m_isFirstEnterDrag;
 
+    void setCookieJarPath(const char* path);
+    RefPtr<net::PageNetExtraData> m_pageNetExtraData;
+
     static int64_t m_firstFrameId;
 
     blink::WebThread::TaskObserver* m_createDevToolsAgentTaskObserver;
@@ -263,12 +275,7 @@ public:
     cc::LayerTreeHost* m_layerTreeHost;
     bool m_painting;
         
-    enum WebPageState {
-        pageUninited,
-        pageInited,
-        pageDestroying,
-        pageDestroyed
-    } m_state;
+    WebPageState m_state;
 
     bool m_LMouseDown;
     bool m_RMouseDown;
