@@ -20,7 +20,15 @@ wkeUiThreadPostTaskCallback g_wkeUiThreadPostTaskCallback = nullptr;
 wkeWillMediaLoadCallback g_wkeWillMediaLoadCallback = nullptr;
 void* g_wkeWillMediaLoadCallbackCallbackParam = nullptr;
 
+wkeOnPluginFindCallback g_wkePluginFindcallback = nullptr;
+void* g_wkePluginFindcallbackParam = nullptr;
+
+wkeMediaPlayerFactory g_wkeMediaPlayerFactory = nullptr;
+wkeOnIsMediaPlayerSupportsMIMEType g_onIsMediaPlayerSupportsMIMETypeCallback = nullptr;
+
 wkeTempCallbackInfo g_wkeTempCallbackInfo;
+
+std::set<wkeWebView> g_liveWebViews;
 
 }
 

@@ -28,7 +28,6 @@
 #include "config.h"
 #include "content/web_impl_win/npapi/WebPluginImpl.h"
 
-#include "content/web_impl_win/WebCookieJarCurlImpl.h"
 #include "content/web_impl_win/npapi/PluginDatabase.h"
 #include "content/web_impl_win/npapi/PluginPackage.h"
 #include "content/web_impl_win/npapi/PluginMainThreadScheduler.h"
@@ -57,6 +56,8 @@
 #include "third_party/npapi/bindings/npapi.h"
 #include "gen/blink/core/HTMLNames.h"
 #include "wtf/text/WTFStringUtil.h"
+#include "wke/wkeWebView.h"
+#include "net/cookies/WebCookieJarCurlImpl.h"
 
 using std::min;
 
@@ -161,6 +162,11 @@ WebPluginImpl::WebPluginImpl(WebLocalFrame* parentFrame, const blink::WebPluginP
         m_plugin = PluginDatabase::installedPlugins()->findPlugin(m_url, m_mimeType);
 
     if (!m_plugin) {
+        String mime("application/virtual-plugin");
+        m_plugin = PluginDatabase::installedPlugins()->findPlugin(m_url, mime);
+    }
+
+    if (!m_plugin) {
         m_status = PluginStatusCanNotFindPlugin;
         return;
     }
@@ -172,8 +178,6 @@ WebPluginImpl::WebPluginImpl(WebLocalFrame* parentFrame, const blink::WebPluginP
     instanceMap().add(m_instance, this);
     memset(&m_npWindow, 0, sizeof(m_npWindow));
     setParameters(params.attributeNames, params.attributeValues);
-
-    //resize(size);
 }
 
 WebPluginImpl::~WebPluginImpl()
@@ -188,9 +192,6 @@ WebPluginImpl::~WebPluginImpl()
     if (m_instance)
         instanceMap().remove(m_instance);
 
-    //     if (m_isWaitingToStart)
-    //         m_parentFrame->document()->removeMediaCanStartListener(this);
-
     stop();
 
     freeStringArray(m_paramNames, m_paramCount);
@@ -199,9 +200,6 @@ WebPluginImpl::~WebPluginImpl()
     platformDestroy();
 
     m_pluginContainer->clearScriptObjects();
-
-//     if (m_plugin && !(m_plugin->quirks().contains(PluginQuirkDontUnloadPlugin)))
-//         m_plugin->unload(); // 不卸载了，卸载容易出各种问题
 
 #ifndef NDEBUG
     webPluginImplCount.decrement();
@@ -233,7 +231,6 @@ void WebPluginImpl::init()
         return;
     }
 
-    //WTF_LOG(Plugins, "WebPluginImpl::init(): Initializing plug-in '%s'", m_plugin->name().utf8().data());
     if (!m_plugin->load()) {
         m_plugin = nullptr;
         m_status = PluginStatusCanNotLoadPlugin;
@@ -253,15 +250,6 @@ bool WebPluginImpl::startOrAddToUnstartedList()
     if (!m_parentFrame->page())
         return false;
 
-    // We only delay starting the plug-in if we're going to kick off the load
-    // ourselves. Otherwise, the loader will try to deliver data before we've
-    // started the plug-in.
-//     if (!m_loadManually && !m_parentFrame->page()->canStartMedia()) {
-//         m_parentFrame->document()->addMediaCanStartListener(this);
-//         m_isWaitingToStart = true;
-//         return true;
-//     }
-
     return start();
 }
 
@@ -280,11 +268,9 @@ bool WebPluginImpl::start()
     NPError npErr;
     {
         WebPluginImpl::setCurrentPluginView(this);
-        //JSC::JSLock::DropAllLocks dropAllLocks(JSDOMWindowBase::commonVM());
         setCallingPlugin(true);
         npErr = m_plugin->pluginFuncs()->newp((NPMIMEType)m_mimeType.utf8().data(), m_instance, m_mode, m_paramCount, m_paramNames, m_paramValues, NULL);
         setCallingPlugin(false);
-        //LOG_NPERROR(npErr);
         WebPluginImpl::setCurrentPluginView(0);
     }
 
@@ -650,7 +636,7 @@ NPError WebPluginImpl::setValue(NPPVariable variable, void* value)
         m_isTransparent = value;
         return NPERR_NO_ERROR;
     default:
-        notImplemented();
+         //notImplemented();
         return NPERR_GENERIC_ERROR;
     }
 }
@@ -1195,14 +1181,6 @@ NPError WebPluginImpl::getValue(NPNVariable variable, void* value)
     }
 }
 
-// static Frame* getFrame(Frame* parentFrame, Element* element)
-// {
-//     if (parentFrame)
-//         return parentFrame;
-//     
-//     return element->document().frame();
-// }
-
 NPError WebPluginImpl::getValueForURL(NPNURLVariable variable, const char* url, char** value, uint32_t* len)
 {
     //LOG(Plugins, "WebPluginImpl::getValueForURL(%s)", prettyNameForNPNURLVariable(variable).data());
@@ -1213,10 +1191,9 @@ NPError WebPluginImpl::getValueForURL(NPNURLVariable variable, const char* url, 
     case NPNURLVCookie: {
         KURL u(m_parentFrame->document()->baseURL(), url);
         if (u.isValid()) {
-            //Frame* frame = getFrame(parentFrame(), m_element);
             LocalFrame* frame = parentFrame();
             if (frame) {
-                const CString cookieStr(WebCookieJarImpl::inst()->cookies(u, WebURL()).utf8().c_str());
+                const CString cookieStr(m_wkeWebview->getCookieJar()->cookies(u, WebURL()).utf8().c_str());
                 if (!cookieStr.isNull()) {
                     const int size = cookieStr.length();
                     *value = static_cast<char*>(NPN_MemAlloc(size+1));
@@ -1277,9 +1254,8 @@ NPError WebPluginImpl::setValueForURL(NPNURLVariable variable, const char* url, 
         KURL u(m_parentFrame->document()->baseURL(), url);
         if (u.isValid()) {
             const String cookieStr = String::fromUTF8(value, len);
-            //Frame* frame = getFrame(parentFrame(), m_element);
             if (!cookieStr.isEmpty())
-                WebCookieJarImpl::inst()->setCookie(u, WebURL(), cookieStr);
+                m_wkeWebview->getCookieJar()->setCookie(u, WebURL(), cookieStr);
         } else
             result = NPERR_INVALID_URL;
         break;

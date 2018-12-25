@@ -12,6 +12,8 @@
 #include "node_counters.h"
 #endif
 
+#undef HAVE_OPENSSL // weolar
+
 #if HAVE_OPENSSL
 #include "node_crypto.h"
 #endif
@@ -26,6 +28,7 @@
 #include "async-wrap-inl.h"
 #include "env.h"
 #include "env-inl.h"
+#include "node_api.h"
 #include "handle_wrap.h"
 #include "req-wrap.h"
 #include "req-wrap-inl.h"
@@ -61,6 +64,11 @@ typedef int mode_t;
 #if USING_VC6RT == 1
 extern "C" int snprintf(char* buf, size_t len, const char* fmt, ...);
 #endif
+
+void napi_module_register_by_symbol(v8::Local<v8::Object> exports,
+    v8::Local<v8::Value> module,
+    v8::Local<v8::Context> context,
+    napi_addon_register_func init);
 
 namespace node {
 
@@ -735,6 +743,8 @@ namespace node {
 			cons = String::Concat(cons, FIXED_ONE_BYTE_STRING(env->isolate(), "'"));
 		}
 		e = Exception::Error(cons);
+    if (!env)
+      return e;
 
 		Local<Object> obj = e->ToObject(env->isolate());
 		obj->Set(env->errno_string(), Integer::New(env->isolate(), errorno));
@@ -797,6 +807,8 @@ namespace node {
 		}
 
 		Local<Object> e = Exception::Error(js_msg)->ToObject(isolate);
+    if (!env)
+        return e;
 
 		// TODO(piscisaureus) errno should probably go; the user has no way of
 		// knowing which uv errno value maps to which error.
@@ -843,6 +855,7 @@ namespace node {
 	Local<Value> WinapiErrnoException(Isolate* isolate, int errorno, const char* syscall, const char* msg, const char* path) {
 		Environment* env = Environment::GetCurrent(isolate);
 		Local<Value> e;
+
 		bool must_free = false;
 		if (!msg || !msg[0]) {
 			msg = winapi_strerror(errorno, &must_free);
@@ -861,6 +874,8 @@ namespace node {
 		else {
 			e = Exception::Error(message);
 		}
+    if (!env)
+        return e;
 
 		Local<Object> obj = e->ToObject(env->isolate());
 		obj->Set(env->errno_string(), Integer::New(isolate, errorno));
@@ -940,6 +955,8 @@ namespace node {
 		HandleScope scope(isolate);
 
 		Environment* env = Environment::GetCurrent(isolate);
+    if (!env)
+      return false;
 		Local<Object> process_object = env->process_object();
 		Local<String> emitting_top_level_domain_error_key =
 			env->emitting_top_level_domain_error_string();
@@ -952,6 +969,8 @@ namespace node {
 
 	void SetupDomainUse(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		if (env->using_domains())
 			return;
@@ -999,6 +1018,8 @@ namespace node {
 
 	void SetupProcessObject(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		CHECK(args[0]->IsFunction());
 
@@ -1011,6 +1032,8 @@ namespace node {
 
 	void SetupNextTick(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		CHECK(args[0]->IsFunction());
 		CHECK(args[1]->IsObject());
@@ -1041,6 +1064,8 @@ namespace node {
 		Local<Integer> event = Integer::New(isolate, message.GetEvent());
 
 		Environment* env = Environment::GetCurrent(isolate);
+    if (!env)
+        return;
 		Local<Function> callback = env->promise_reject_function();
 
 		if (value.IsEmpty())
@@ -1054,6 +1079,8 @@ namespace node {
 
 	void SetupPromises(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		Isolate* isolate = env->isolate();
 
 		CHECK(args[0]->IsFunction());
@@ -1194,6 +1221,9 @@ namespace node {
 		EscapableHandleScope handle_scope(isolate);
 		Local<Context> context = recv->CreationContext();
 		Environment* env = Environment::GetCurrent(context);
+    if (!env)
+      return Local<Value>();
+
 		Context::Scope context_scope(context);
 		return handle_scope.Escape(
 			Local<Value>::New(isolate, MakeCallback(env, recv, method, argc, argv)));
@@ -1202,6 +1232,8 @@ namespace node {
 		EscapableHandleScope handle_scope(isolate);
 		Local<Context> context = recv->CreationContext();
 		Environment* env = Environment::GetCurrent(context);
+    if (!env)
+      return Local<Value>();
 		Context::Scope context_scope(context);
 		return handle_scope.Escape(
 			Local<Value>::New(isolate, MakeCallback(env, recv, symbol, argc, argv)));
@@ -1210,6 +1242,8 @@ namespace node {
 		EscapableHandleScope handle_scope(isolate);
 		Local<Context> context = recv->CreationContext();
 		Environment* env = Environment::GetCurrent(context);
+    if (!env)
+      return Local<Value>();
 		Context::Scope context_scope(context);
 		return handle_scope.Escape(Local<Value>::New(
 			isolate,
@@ -1566,6 +1600,8 @@ namespace node {
 
 	static void GetActiveRequests(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		Local<Array> ary = Array::New(args.GetIsolate());
 		Local<Context> ctx = env->context();
@@ -1595,6 +1631,8 @@ namespace node {
 	// implemented here for consistency with GetActiveRequests().
 	void GetActiveHandles(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		Local<Array> ary = Array::New(env->isolate());
 		Local<Context> ctx = env->context();
@@ -1664,6 +1702,8 @@ namespace node {
 
 	static void Chdir(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		if (args.Length() != 1 || !args[0]->IsString()) {
 			return env->ThrowTypeError("Bad argument.");
@@ -1679,6 +1719,8 @@ namespace node {
 
 	static void Cwd(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 #ifdef _WIN32
 		/* MAX_PATH is in characters, not bytes. Make sure we have enough headroom. */
 		char buf[MAX_PATH * 4];
@@ -1702,6 +1744,8 @@ namespace node {
 
 	static void Umask(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		uint32_t old;
 
 		if (args.Length() < 1 || args[0]->IsUndefined()) {
@@ -1744,6 +1788,8 @@ namespace node {
 
 	static void Uptime(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		double uptime;
 
 		uv_update_time(env->event_loop());
@@ -1755,6 +1801,8 @@ namespace node {
 
 	void MemoryUsage(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		size_t rss;
 		int err = uv_resident_set_memory(&rss);
@@ -1782,6 +1830,8 @@ namespace node {
 
 	void Kill(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 
 		if (args.Length() != 2) {
 			return env->ThrowError("Bad argument.");
@@ -1999,6 +2049,13 @@ namespace node {
     return lib->handle != nullptr;
   }
 
+  inline napi_addon_register_func GetNapiInitializerCallback(uv_lib_t* lib) {
+    const char* name = STRINGIFY(NAPI_MODULE_INITIALIZER_BASE) STRINGIFY(NAPI_MODULE_VERSION);
+    void* address;
+    uv_dlsym(lib, name, &address);
+    return reinterpret_cast<napi_addon_register_func>(address);
+  }
+
 	// DLOpen is process.dlopen(module, filename).
 	// Used to load 'module.node' dynamically shared objects.
 	//
@@ -2007,6 +2064,8 @@ namespace node {
 	// cache that's a plain C list or hash table that's shared across contexts?
 	void DLOpen(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		uv_lib_t lib;
 
 		CHECK_EQ(modpending, nullptr);
@@ -2045,6 +2104,23 @@ namespace node {
       modpending = nullptr;
     }
 #endif
+
+    if (mp == nullptr) {
+      if (napi_addon_register_func napi_callback = GetNapiInitializerCallback(&lib)) {
+        v8::Local<v8::Object> module;
+        v8::Local<v8::Object> exports;
+        v8::Local<v8::Value> exports_v;
+        v8::Local<v8::Context> context = env->context();
+        if (!args[0]->ToObject(context).ToLocal(&module) ||
+          !module->Get(context, env->exports_string()).ToLocal(&exports_v) ||
+          !exports_v->ToObject(context).ToLocal(&exports)) {
+          return;  // Exception pending.
+        }
+
+        napi_module_register_by_symbol(exports, module, context, napi_callback);
+        return;
+      }
+    }
 
 		if (mp == nullptr) {
       PrintCallStack(args.GetIsolate());
@@ -2159,9 +2235,9 @@ namespace node {
     OutputDebugStringA(error_mesage_buf);
     delete[] error_mesage_buf;
 
-    DebugBreak();
+    //DebugBreak();
 
-    ::TerminateProcess((HANDLE)-1, 0);
+    //::TerminateProcess((HANDLE)-1, 0);
     return;
 
 		Local<Object> process_object = env->process_object();
@@ -2261,7 +2337,8 @@ namespace node {
 	}
 	static void Binding(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
-
+    if (!env)
+        return;
 		Local<String> module = args[0]->ToString(env->isolate());
 		node::Utf8Value module_v(env->isolate(), module);
 
@@ -2320,6 +2397,8 @@ namespace node {
 
 	static void LinkedBinding(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args.GetIsolate());
+    if (!env)
+        return;
 
 		Local<String> module_name = args[0]->ToString(env->isolate());
 
@@ -2439,6 +2518,8 @@ namespace node {
 
 	static void EnvEnumerator(const PropertyCallbackInfo<Array>& info) {
 		Environment* env = Environment::GetCurrent(info);
+    if (!env)
+        return;
 		Isolate* isolate = env->isolate();
 		Local<Context> ctx = env->context();
 		Local<Function> fn = env->push_values_to_array_function();
@@ -2550,6 +2631,8 @@ namespace node {
 
 	static void NeedImmediateCallbackGetter(Local<Name> property, const PropertyCallbackInfo<Value>& info) {
 		Environment* env = Environment::GetCurrent(info);
+    if (!env)
+        return;
 		const uv_check_t* immediate_check_handle = env->immediate_check_handle();
 		bool active = uv_is_active(
 			reinterpret_cast<const uv_handle_t*>(immediate_check_handle));
@@ -2557,6 +2640,8 @@ namespace node {
 	}
 	static void NeedImmediateCallbackSetter(Local<Name> property, Local<Value> value, const PropertyCallbackInfo<void>& info) {
 		Environment* env = Environment::GetCurrent(info);
+    if (!env)
+        return;
 
 		uv_check_t* immediate_check_handle = env->immediate_check_handle();
 		bool active = uv_is_active(
@@ -2601,10 +2686,14 @@ namespace node {
 
 	void StartProfilerIdleNotifier(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		StartProfilerIdleNotifier(env);
 	}
 	void StopProfilerIdleNotifier(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		StopProfilerIdleNotifier(env);
 	}
 
@@ -2718,6 +2807,11 @@ namespace node {
 				"openssl",
 				OneByteString(env->isolate(), &OPENSSL_VERSION_TEXT[i], j - i));
 		}
+#else
+    READONLY_PROPERTY(
+        versions,
+        "openssl",
+        OneByteString(env->isolate(), "0", 1));
 #endif
 
 		// process.arch
@@ -3379,6 +3473,8 @@ namespace node {
 
 				HandleScope scope(isolate);
 				Environment* env = Environment::GetCurrent(isolate);
+        if (!env)
+            return;
 				Context::Scope context_scope(env->context());
 
 				StartDebug(env, nullptr, false);
@@ -3445,6 +3541,8 @@ namespace node {
 	}
 	static void DebugProcess(const FunctionCallbackInfo<Value>& args) {
 		Environment* env = Environment::GetCurrent(args);
+    if (!env)
+        return;
 		Isolate* isolate = args.GetIsolate();
 		DWORD pid;
 		HANDLE process = nullptr;
@@ -3539,6 +3637,8 @@ namespace node {
 	static void DebugEnd(const FunctionCallbackInfo<Value>& args) {
 		if (debugger_running) {
 			Environment* env = Environment::GetCurrent(args);
+      if (!env)
+          return;
 			env->debugger_agent()->Stop();
 			debugger_running = false;
 		}
@@ -3641,6 +3741,15 @@ namespace node {
 		at_exit_functions_ = p;
 	}
 
+  void AddEnvironmentCleanupHook(Isolate* isolate, void(*fun)(void* arg), void* arg) {
+    Environment* env = Environment::GetCurrent(isolate);
+    env->AddCleanupHook(fun, arg);
+  }
+
+  void RemoveEnvironmentCleanupHook(Isolate* isolate, void(*fun)(void* arg), void* arg) {
+    Environment* env = Environment::GetCurrent(isolate);
+    env->RemoveCleanupHook(fun, arg);
+  }
 
 	void EmitBeforeExit(Environment* env) {
 		HandleScope handle_scope(env->isolate());

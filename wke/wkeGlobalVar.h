@@ -2,6 +2,7 @@
 #ifndef wke_wkeGlobalVar_h
 
 #include <string>
+#include <set>
 #include "wke.h"
 
 namespace wke {
@@ -24,7 +25,15 @@ extern wkeUiThreadPostTaskCallback g_wkeUiThreadPostTaskCallback;
 extern wkeWillMediaLoadCallback g_wkeWillMediaLoadCallback;
 extern void* g_wkeWillMediaLoadCallbackCallbackParam;
 
+extern wkeMediaPlayerFactory g_wkeMediaPlayerFactory;
+extern wkeOnIsMediaPlayerSupportsMIMEType g_onIsMediaPlayerSupportsMIMETypeCallback;
+
+extern wkeOnPluginFindCallback g_wkePluginFindcallback;
+extern void* g_wkePluginFindcallbackParam;
+
 extern wkeTempCallbackInfo g_wkeTempCallbackInfo;
+
+extern std::set<wkeWebView> g_liveWebViews;
 
 }
 

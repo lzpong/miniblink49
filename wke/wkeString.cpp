@@ -98,7 +98,7 @@ const wchar_t* CString::stringW() const
         size_t wtfWideLen = stringBuf.size();
 
         m_wide = new wchar_t[wtfWideLen + 1];
-        memcpy(m_wide, wtfWide, (wtfWideLen + 1)* sizeof(wchar_t));
+        memcpy(m_wide, wtfWide, (wtfWideLen)* sizeof(wchar_t));
 
         m_wide[wtfWideLen] = 0;
     }
@@ -150,7 +150,7 @@ const char* createTempCharString(const char* str, size_t length)
 {
     if (!str || 0 == length)
         return "";
-    std::vector<char>* stringBuffer = new std::vector<char>(length);
+    std::vector<char>* stringBuffer = new std::vector<char>(length + 1);
     memcpy(&stringBuffer->at(0), str, length * sizeof(char));
     stringBuffer->push_back('\0');
 
@@ -164,7 +164,7 @@ const wchar_t* createTempWCharString(const wchar_t* str, size_t length)
 {
     if (!str || 0 == length)
         return L"";
-    std::vector<wchar_t>* stringBuffer = new std::vector<wchar_t>(length);
+    std::vector<wchar_t>* stringBuffer = new std::vector<wchar_t>(length + 1);
     memcpy(&stringBuffer->at(0), str, length * sizeof(wchar_t));
     stringBuffer->push_back(L'\0');
 

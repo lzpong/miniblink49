@@ -318,13 +318,17 @@ LRESULT PlatformEventHandler::fireMouseEvent(HWND hWnd, UINT message, WPARAM wPa
         if (WM_LBUTTONDOWN == message)
             isDraggable = doDraggableRegionNcHitTest(hWnd, pos, info.draggableRegion);
         if (hWnd && info.isNeedSetFocus) {
-            if (isValideWindow && ::GetFocus() != hWnd)
+            if (isValideWindow && ::GetFocus() != hWnd) {
                 ::SetFocus(hWnd);
+                m_webViewImpl->setFocus(true);
+                m_webViewImpl->setIsActive(true);
+            }
             if (isValideWindow && !isDraggable)
                 ::SetCapture(hWnd);
         }
         switch (message) {
         case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
             webMouseEvent.button = WebMouseEvent::ButtonLeft;
             webMouseEvent.modifiers |= WebMouseEvent::LeftButtonDown;
             break;
@@ -446,7 +450,7 @@ LRESULT PlatformEventHandler::fireWheelEvent(HWND hWnd, UINT message, WPARAM wPa
     y = point.y;
 
     int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-
+    int modifiers = 0;
     static const float cScrollbarPixelsPerLine = 100.0f / 3.0f;
     float delta = wheelDelta / static_cast<float>(WHEEL_DELTA);
 
@@ -462,6 +466,7 @@ LRESULT PlatformEventHandler::fireWheelEvent(HWND hWnd, UINT message, WPARAM wPa
         deltaX = delta * static_cast<float>(horizontalScrollChars()) * cScrollbarPixelsPerLine;
         deltaY = 0;
         granularity = blink::ScrollByPixelWheelEvent;
+        modifiers |= WebInputEvent::ShiftKey;
     } else {
         deltaX = 0;
         deltaY = delta;
@@ -470,7 +475,10 @@ LRESULT PlatformEventHandler::fireWheelEvent(HWND hWnd, UINT message, WPARAM wPa
         if (granularity == blink::ScrollByPixelWheelEvent)
             deltaY *= static_cast<float>(verticalMultiplier)* cScrollbarPixelsPerLine;
     }
-
+   
+    if (ctrlKey)
+        modifiers |= WebInputEvent::ControlKey;
+    
     WebMouseWheelEvent webWheelEvent;
     webWheelEvent.type = WebInputEvent::MouseWheel;
     webWheelEvent.x = x;
@@ -482,6 +490,7 @@ LRESULT PlatformEventHandler::fireWheelEvent(HWND hWnd, UINT message, WPARAM wPa
     webWheelEvent.wheelTicksX = 0.f;
     webWheelEvent.wheelTicksY = delta;
     webWheelEvent.hasPreciseScrollingDeltas = true;
+    webWheelEvent.modifiers = modifiers;
     m_webWidget->handleInputEvent(webWheelEvent);
 
     return 0;

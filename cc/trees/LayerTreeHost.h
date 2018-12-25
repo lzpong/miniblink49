@@ -17,6 +17,7 @@ class WebGestureCurveTarget;
 class IntRect;
 struct WebFloatSize;
 class WebThread;
+class WebThreadSupportingGC;
 }
 
 namespace cc_blink {
@@ -63,7 +64,7 @@ public:
 
     //void updateLayers(SkCanvas* canvas, const blink::IntRect& clip, bool needsFullTreeSync);
     void recordDraw();
-    void drawToCanvas(SkCanvas* canvas, const SkRect& clip);
+    bool drawToCanvas(SkCanvas* canvas, const SkRect& clip);
     void updateLayersDrawProperties();
 
     //void setNeedsCommit();
@@ -196,6 +197,7 @@ private:
     void requestPaintToMemoryCanvasToUiThread(const SkRect& r);
     void onApplyActionsInCompositeThread(bool needCheck);
     void waitForApplyActions();
+    void waitForDrawFrame();
     void drawFrameInCompositeThread();
     void paintToMemoryCanvasInUiThread(const SkRect& paintRect);
     void paintToMemoryCanvasInCompositeThread(const SkRect& r);
@@ -239,8 +241,9 @@ private:
     WTF::Vector<LayerChangeAction*> m_actions;
     WTF::HashMap<int, CompositingLayer*> m_liveCCLayers;
     //////////////////////////////////////////////////////////////////////////
-    blink::WebThread* m_compositeThread;
+    WTF::OwnPtr<blink::WebThreadSupportingGC> m_compositeThread;
     WTF::Mutex m_compositeMutex;
+    WTF::Mutex m_rootCCLayerMutex;
     SkCanvas* m_memoryCanvas;
 
     double m_lastCompositeTime;

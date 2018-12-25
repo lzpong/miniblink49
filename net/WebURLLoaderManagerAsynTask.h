@@ -20,7 +20,11 @@ public:
 
     virtual void run() override
     {
+        WTF::Locker<WTF::Mutex> locker(m_manager->m_shutdownMutex);
         if (!m_manager->downloadOnIoThread())
+            return;
+
+        if (m_manager->m_isShutdown)
             return;
 
         IoTask* task = new IoTask(m_manager, m_thread, true);
@@ -86,10 +90,14 @@ public:
             String tempPath = m_manager->handleHeaderForBlobOnMainThread(job, job->m_asynWkeNetSetData->size());
             job->m_response.setDownloadFilePath(tempPath);
         }
-        // job->client()->didReceiveResponse(job->loader(), job->m_response);
+
+        job->m_response.setHTTPStatusCode(200);
+        job->m_response.setHTTPStatusText(blink::WebString::fromUTF8("OK"));
+
         m_manager->handleDidReceiveResponse(job);
 
         if (job->m_asynWkeNetSetData && kNormalCancelled != job->m_cancelledReason) { // 可能在didReceiveResponse里被cancel
+            job->m_response.setExpectedContentLength(static_cast<long long int>(job->m_asynWkeNetSetData->size()));
             m_manager->didReceiveDataOrDownload(job, job->m_asynWkeNetSetData->data(), job->m_asynWkeNetSetData->size(), 0);
             m_manager->handleDidFinishLoading(job, WTF::currentTime(), 0);
         }

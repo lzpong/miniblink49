@@ -47,6 +47,8 @@ namespace blink {
 class WebURLRequest;
 class WebURLResponse;
 struct WebURLError;
+class WebURLLoaderClient;
+class WebURLLoader;
 }
 
 namespace net {
@@ -54,8 +56,10 @@ namespace net {
 class JobHead;
 class WebURLLoaderInternal;
 class WebURLLoaderManager;
+class WebCookieJarImpl;
 struct BlobTempFileInfo;
 struct InitializeHandleInfo;
+struct MainTaskArgs;
 
 class AutoLockJob {
 public:
@@ -77,6 +81,7 @@ public:
     class IoTask;
     class MainTask;
     static WebURLLoaderManager* sharedInstance();
+    static void setCookieJarFullPath(const char* path);
     int addAsynchronousJob(WebURLLoaderInternal*);
     void cancel(int jobId);
     void cancelAll();
@@ -87,7 +92,7 @@ public:
 
     CURLSH* getCurlShareHandle() const;
 
-    const char* getCookieJarFileName() const;
+    //const char* getCookieJarFileName() const;
 
     void dispatchSynchronousJob(WebURLLoaderInternal*);
 
@@ -100,8 +105,11 @@ public:
 
     bool isShutdown() const { return m_isShutdown; }
 
+    void appendDataToBlobCacheWhenDidDownloadData(blink::WebURLLoaderClient* client, blink::WebURLLoader* loader, const String& url, const char* data, int dataLength, int encodedDataLength);
+    String createBlobTempFileInfoByUrlIfNeeded(const String& url);
     String handleHeaderForBlobOnMainThread(WebURLLoaderInternal* job, size_t totalSize);
     BlobTempFileInfo* getBlobTempFileInfoByTempFilePath(const String& path);
+    
     void didReceiveDataOrDownload(WebURLLoaderInternal* job, const char* data, int dataLength, int encodedDataLength);
     void handleDidFinishLoading(WebURLLoaderInternal* job, double finishTime, int64_t totalEncodedDataLength);
     void handleDidFail(WebURLLoaderInternal* job, const blink::WebURLError& error);
@@ -112,8 +120,10 @@ public:
 
     blink::WebThread* getIoThread() const { return m_thread; }
 
+    WebCookieJarImpl* getShareCookieJar() const;
+
 private:
-    WebURLLoaderManager();
+    WebURLLoaderManager(const char* cookieJarFullPath);
     ~WebURLLoaderManager();
 
     bool doCancel(JobHead* jobHeead, CancelledReason cancelledReason);
@@ -124,7 +134,7 @@ private:
     bool downloadOnIoThread();
     void removeFromCurlOnIoThread(int jobId);
 
-    void applyAuthenticationToRequest(WebURLLoaderInternal*, blink::WebURLRequest*);
+    void applyAuthenticationToRequest(WebURLLoaderInternal* job);
 
     int initializeHandleOnMainThread(WebURLLoaderInternal* job);
     void initializeHandleOnIoThread(int jobId, InitializeHandleInfo* info);
@@ -134,12 +144,16 @@ private:
 
     void dispatchSynchronousJobOnIoThread(WebURLLoaderInternal* job, InitializeHandleInfo* info, CURLcode* ret, int* isCallFinish);
 
-    void initCookieSession();
+    void initCookieSession(const char* cookiePath);
+
+    static WebURLLoaderManager* m_sharedInstance;
 
     Vector<WebURLLoaderInternal*> m_resourceHandleList;
     CURLM* m_curlMultiHandle;
-    CURLSH* m_curlShareHandle;
-    char* m_cookieJarFileName;
+    //CURLSH* m_curlShareHandle;
+    //char* m_cookieJarFileName;
+    WebCookieJarImpl* m_shareCookieJar;
+
     char m_curlErrorBuffer[CURL_ERROR_SIZE];
     const CString m_certificatePath;
     int m_runningJobs;
@@ -152,6 +166,10 @@ private:
     WTF::Mutex m_liveJobsMutex;
     WTF::HashMap<int, JobHead*> m_liveJobs;
     int m_newestJobId;
+
+    WTF::Mutex m_shutdownMutex;
+
+    //WTF::HashMap<int, MainTaskArgs*> m_writeCallbackCache;
     
     WTF::HashMap<String, BlobTempFileInfo*> m_blobCache; // real url -> <temp, data>
 };

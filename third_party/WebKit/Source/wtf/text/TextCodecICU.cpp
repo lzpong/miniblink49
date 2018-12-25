@@ -227,6 +227,7 @@ void TextCodecICU::registerEncodingNames(EncodingNameRegistrar registrar)
 
 #else
     registrar("gb2312", "gb2312");
+    registrar("gb18030", "gb18030");
     registrar("gb_2312", "gb_2312");
     registrar("GBK", "GBK");
 #endif // MINIBLINK_NOT_IMPLEMENTED
@@ -252,6 +253,8 @@ void TextCodecICU::registerCodecs(TextCodecRegistrar registrar)
     }
 #else
     registrar("gb2312", create, 0);
+    registrar("gb18030", create, 0);
+    registrar("gb_2312", create, 0);
     registrar("GBK", create, 0);
 #endif // MINIBLINK_NOT_IMPLEMENTED
 }
@@ -517,7 +520,11 @@ String TextCodecICU::decode(const char* bytes, size_t length, FlushBehavior flus
 
 #else
     Vector<UChar> resultBuffer;
-    if (strcasecmp(m_encoding.name(), "gb2312") && strcasecmp(m_encoding.name(), "GBK"))
+    if (strcasecmp(m_encoding.name(), "gb2312") && 
+        strcasecmp(m_encoding.name(), "GBK") && 
+        strcasecmp(m_encoding.name(), "gb18030") &&
+        strcasecmp(m_encoding.name(), "gb_2312")
+        )
         return String();
 
     if (0 == length)
@@ -587,8 +594,21 @@ bool TextCodecICU::hasValidChar()
 bool TextCodecICU::toUnicode(unsigned char c, UChar& uc)
 {
     m_incrementalDataChunk[m_incrementalDataChunkLength++] = c;
-    if (m_incrementalDataChunkLength + 2 >= kIncrementalDataChunkLength || hasValidChar()) {
-        int ret = MultiByteToWideChar(GBK_CONV_CODE_PAGE, 0, (LPSTR)m_incrementalDataChunk, m_incrementalDataChunkLength, &uc, 1);
+    if (m_incrementalDataChunkLength + 2 <= kIncrementalDataChunkLength && hasValidChar()) {
+        int ret = 0;
+        unsigned char c1 = m_incrementalDataChunk[0];
+        unsigned char c2 = m_incrementalDataChunk[1];
+        m_incrementalDataChunk[1];
+        if ((0x8e == c1 && 0x22 == c2) || (0x8f == c1 && 0x22 == c2) || (0xa0 == c1 && 0x22 == c2)) {
+            // to fix:
+            // https://item.jd.com/6683207.html
+            // https://newbuz.360buyimg.com/video/4.2/video.hls.min.js
+            uc = L'\"'; 
+            ret = 1;
+        } else {
+            ret = MultiByteToWideChar(GBK_CONV_CODE_PAGE, 0, (LPSTR)m_incrementalDataChunk, m_incrementalDataChunkLength, &uc, 1);
+        }
+
         m_incrementalDataChunkLength = 0;
 
         return ret == 1 ? true : false;
@@ -779,7 +799,10 @@ CString TextCodecICU::encode(const UChar* characters, size_t length, Unencodable
     return encodeCommon(characters, length, handling);
 #else
     std::vector<char> resultBuffer;
-    if (strcasecmp(m_encoding.name(), "gb2312") && strcasecmp(m_encoding.name(), "GBK"))
+    if (strcasecmp(m_encoding.name(), "gb2312") &&
+        strcasecmp(m_encoding.name(), "GBK") &&
+        strcasecmp(m_encoding.name(), "gb18030") &&
+        strcasecmp(m_encoding.name(), "gb_2312"))
         return CString();
 
     WCharToMByte(characters, length, &resultBuffer, GBK_CONV_CODE_PAGE);
@@ -794,7 +817,10 @@ CString TextCodecICU::encode(const LChar* characters, size_t length, Unencodable
 #ifdef MINIBLINK_NOT_IMPLEMENTED
     return encodeCommon(characters, length, handling);
 #else
-    if (strcasecmp(m_encoding.name(), "gb2312") && strcasecmp(m_encoding.name(), "GBK"))
+    if (strcasecmp(m_encoding.name(), "gb2312") &&
+        strcasecmp(m_encoding.name(), "GBK") &&
+        strcasecmp(m_encoding.name(), "gb18030") &&
+        strcasecmp(m_encoding.name(), "gb_2312"))
         return CString();
 
     bool sawError = false;
