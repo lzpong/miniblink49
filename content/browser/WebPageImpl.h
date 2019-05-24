@@ -22,20 +22,10 @@ namespace cc {
 class LayerTreeHost;
 }
 
-#if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
-namespace cef {
-class BrowserHostImpl;
-}
-#endif
-
 namespace blink {
 struct Referrer;
 class WebViewImpl;
 }
-
-#if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
-class CefBrowserHostImpl;
-#endif
 
 namespace net {
 class PageNetExtraData;
@@ -63,7 +53,7 @@ class WebPageImpl
     , public cc::LayerTreeHostClent
     , public PopupMenuWinClient {
 public:
-    WebPageImpl();
+    WebPageImpl(COLORREF bdColor);
     ~WebPageImpl();
 
     class DestroyNotif {
@@ -101,6 +91,9 @@ public:
     virtual void initializeLayerTreeView() override;
     virtual blink::WebWidget* createPopupMenu(blink::WebPopupType) override;
     virtual blink::WebStorageNamespace* createSessionStorageNamespace() override;
+#ifndef MINIBLINK_NO_PAGE_LOCALSTORAGE
+    virtual blink::WebStorageNamespace* createLocalStorageNamespace() override;
+#endif
     virtual blink::WebString acceptLanguages() override;
     void setScreenInfo(const blink::WebScreenInfo& info);
     virtual blink::WebScreenInfo screenInfo() override;
@@ -108,6 +101,7 @@ public:
     virtual void setToolTipText(const blink::WebString&, blink::WebTextDirection hint) override;
     virtual void draggableRegionsChanged() override;
     virtual void onMouseDown(const blink::WebNode& mouseDownNode) override;
+    virtual void printPage(blink::WebLocalFrame* frame) override;
 
     // Editing --------------------------------------------------------
     virtual bool handleCurrentKeyboardEvent() override;
@@ -163,6 +157,7 @@ public:
     bool fireKeyPressEvent(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     int getCursorInfoType() const;
+    void setCursorInfoType(int type);
 
     HDC viewDC();
     void paintToBit(void* bits, int pitch);
@@ -206,12 +201,8 @@ public:
     static WebPageImpl* getSelfForCurrentContext();
 
     bool initSetting();
-#if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
-    CefBrowserHostImpl* browser() const;
-    void setBrowser(CefBrowserHostImpl* browser);
-#endif
     blink::WebFrame* getWebFrameFromFrameId(int64_t frameId);
-    int64_t getFrameIdByBlinkFrame(const blink::WebFrame* frame);
+    static int64_t getFrameIdByBlinkFrame(const blink::WebFrame* frame);
     static int64_t getFirstFrameId();
 
     blink::WebView* createWkeView(blink::WebLocalFrame* creator,
@@ -247,7 +238,16 @@ public:
     bool m_isDragging;
     bool m_isFirstEnterDrag;
 
-    void setCookieJarPath(const char* path);
+    void setBackgroundColor(COLORREF c);
+
+    void setHwndRenderOffset(const blink::IntPoint& offset);
+    blink::IntPoint getHwndRenderOffset() const;
+
+    void setCookieJarFullPath(const char* path);
+    void setLocalStorageFullPath(const char* path);
+
+    net::WebCookieJarImpl* getCookieJar();
+
     RefPtr<net::PageNetExtraData> m_pageNetExtraData;
 
     static int64_t m_firstFrameId;
@@ -273,9 +273,6 @@ public:
 
     // May be NULL if the browser has not yet been created or if the browser has
     // been destroyed.
-#if (defined ENABLE_CEF) && (ENABLE_CEF == 1)
-    CefBrowserHostImpl* m_browser;
-#endif
 
 #if ENABLE_WKE == 1
     wke::CWebView* wkeWebView() const;

@@ -20,6 +20,7 @@
 #include "net/WebURLLoaderManagerSetupInfo.h"
 #include "net/WebURLLoaderManager.h"
 #include "net/HeaderVisitor.h"
+#include "net/DiskCache.h"
 
 void wkeNetSetHTTPHeaderField(wkeNetJob jobPtr, wchar_t* key, wchar_t* value, bool response)
 {
@@ -56,6 +57,16 @@ const char* wkeNetGetHTTPHeaderField(wkeNetJob jobPtr, const char* key)
     return wke::createTempCharString(valueBuffer.data(), valueBuffer.size());
 }
 
+const char* wkeNetGetHTTPHeaderFieldFromResponse(wkeNetJob jobPtr, const char* key)
+{
+    wke::checkThreadCallIsValid(__FUNCTION__);
+    net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
+    String value = job->m_response.httpHeaderField(String(key));
+    Vector<char> valueBuffer = WTF::ensureStringToUTF8(value, false);
+
+    return wke::createTempCharString(valueBuffer.data(), valueBuffer.size());
+}
+
 void wkeNetSetMIMEType(wkeNetJob jobPtr, const char* type)
 {
     wke::checkThreadCallIsValid(__FUNCTION__);
@@ -79,8 +90,10 @@ const char* wkeNetGetMIMEType(wkeNetJob jobPtr, wkeString mime)
 void wkeNetSetData(wkeNetJob jobPtr, void* buf, int len)
 {
     wke::checkThreadCallIsValid(__FUNCTION__);
-    if (0 == len)
-        return;
+    if (0 == len) {
+        len = 1;
+        buf = " ";
+    }
 
     net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
     WebURLLoaderClient* client = job->client();
@@ -92,11 +105,15 @@ void wkeNetSetData(wkeNetJob jobPtr, void* buf, int len)
         return;
     }
 
+    if (job->m_diskCacheItem) // 如果外部设置了数据，则不走disk cache了
+        delete job->m_diskCacheItem;
+
     if (!job->m_asynWkeNetSetData)
         job->m_asynWkeNetSetData = new Vector<char>();
     job->m_asynWkeNetSetData->resize(len);
     memcpy(job->m_asynWkeNetSetData->data(), buf, len);
     
+    job->m_isHoldJobToAsynCommit = false;
     job->m_isWkeNetSetDataBeSetted = true;
 }
 
@@ -137,16 +154,6 @@ void wkeNetContinueJob(wkeNetJob jobPtr)
     net::WebURLLoaderManager::sharedInstance()->continueJob(job);
 }
 
-// void wkeNetSetURL(wkeNetJob jobPtr, const char* url)
-// {
-//     net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
-//     KURL kurl(ParsedURLString, url);
-//     job->m_response.setURL(kurl);
-//     job->firstRequest()->setURL(kurl);
-//     job->m_initializeHandleInfo->url = url;
-//     ASSERT(!job->m_url);
-// }
-
 void wkeNetChangeRequestUrl(wkeNetJob jobPtr, const char* url)
 {
     wke::checkThreadCallIsValid(__FUNCTION__);
@@ -154,14 +161,17 @@ void wkeNetChangeRequestUrl(wkeNetJob jobPtr, const char* url)
     blink::KURL newUrl(blink::ParsedURLString, url);
     job->m_response.setURL(newUrl);
     job->firstRequest()->setURL(newUrl);
-    job->m_initializeHandleInfo->url = url;
-    ASSERT(!job->m_url);
+	if (job->m_initializeHandleInfo)
+		job->m_initializeHandleInfo->url = url;
+    //ASSERT(!job->m_url);
 }
 
-void wkeNetHoldJobToAsynCommit(wkeNetJob jobPtr)
+BOOL wkeNetHoldJobToAsynCommit(wkeNetJob jobPtr)
 {
     wke::checkThreadCallIsValid(__FUNCTION__);
     net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
+    if (job->m_isRedirection || job->m_isSynchronous)
+        return FALSE;
 
     job->m_isWkeNetSetDataBeSetted = false;
     if (job->m_asynWkeNetSetData)
@@ -175,6 +185,8 @@ void wkeNetHoldJobToAsynCommit(wkeNetJob jobPtr)
     job->m_isHookRequest &= (~((unsigned int)1));
 
     job->m_isHoldJobToAsynCommit = true;
+
+    return TRUE;
 }
 
 wkeRequestType wkeNetGetRequestMethod(void *jobPtr)
@@ -196,7 +208,7 @@ wkeRequestType wkeNetGetRequestMethod(void *jobPtr)
     return kWkeRequestTypeInvalidation;
 }
 
-wkePostBodyElements* wkeNetGetPostBody(void *jobPtr)
+wkePostBodyElements* wkeNetGetPostBody(void* jobPtr)
 {
     wke::checkThreadCallIsValid(__FUNCTION__);
     net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
@@ -508,6 +520,30 @@ private:
     wkeOnUrlRequestDidFinishLoadingCallback m_didFinishLoadingCallback;
 };
 
+blinkWebURLRequestPtr wkeNetCopyWebUrlRequest(wkeNetJob jobPtr, bool needExtraData)
+{
+    net::WebURLLoaderInternal* job = (net::WebURLLoaderInternal*)jobPtr;
+    blink::WebURLRequest* request = job->firstRequest();
+
+    blink::WebURLRequest* result = new blink::WebURLRequest();
+    result->assign(*request);
+
+    if (!needExtraData)
+        result->setExtraData(nullptr);
+
+    return result;
+}
+
+void wkeNetDeleteBlinkWebURLRequestPtr(blinkWebURLRequestPtr ptr)
+{
+    delete ptr;
+}
+
+wkeWebUrlRequestPtr wkeNetCreateWebUrlRequest2(const blinkWebURLRequestPtr request)
+{
+    return new wkeWebUrlRequest(nullptr, *request);
+}
+
 wkeWebUrlRequestPtr wkeNetCreateWebUrlRequest(const utf8* url, const utf8* method, const utf8* mime)
 {
     return new wkeWebUrlRequest(url, method, mime);
@@ -573,7 +609,7 @@ wkePostBodyElements* flattenHTTPBodyElementToWke(const WTF::Vector<net::FlattenH
     wkePostBodyElements* result = wkeNetCreatePostBodyElements(nullptr, body.size());
     result->isDirty = false;
     for (size_t i = 0; i < result->elementSize; ++i) {
-        wkePostBodyElement*wkeElement = wkeNetCreatePostBodyElement(nullptr);
+        wkePostBodyElement* wkeElement = wkeNetCreatePostBodyElement(nullptr);
         result->element[i] = wkeElement;
         const net::FlattenHTTPBodyElement* element = body[i];
 

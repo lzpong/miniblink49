@@ -14,6 +14,9 @@ bool g_isDecodeUrlRequest = false;
 void* g_tipPaintCallback = nullptr;
 float g_contentScale = 1;
 bool g_rendererAntiAlias = false;
+bool g_diskCacheEnable = false;
+bool g_smootTextEnable = false;
+bool g_consoleOutputEnable = true;
 
 wkeUiThreadPostTaskCallback g_wkeUiThreadPostTaskCallback = nullptr;
 

@@ -16,6 +16,7 @@
 #include "third_party/WebKit/public/web/WebLocalFrame.h"
 #include "content/browser/WebFrameClientImpl.h"
 #include "content/browser/WebPage.h"
+#include "content/web_impl_win/WebThreadImpl.h"
 #include "wke/wke.h"
 #include "wke/wkeJsBind.h"
 #include "wke/wkeWebView.h"
@@ -46,15 +47,6 @@ private:
         accessorSetterArg.Clear();
     }
 };
-typedef JsExecStateInfo* jsExecState;
-static Vector<jsExecState>* s_execStates = nullptr;
-
-JsExecStateInfo* JsExecStateInfo::create()
-{
-    JsExecStateInfo* retVal = new JsExecStateInfo();
-    s_execStates->append(retVal);
-    return retVal;
-}
 
 // jsValue 的值分两种情况，一种是c++创建的，一种是v8创建再转换成jsValue的
 class WkeJsValue {
@@ -67,7 +59,7 @@ public:
         wkeJsValueV8Value,
         wkeJsValueNull,
         wkeJsValueUndefined,
-    } ;
+    };
 
     WkeJsValue()
     {
@@ -101,8 +93,29 @@ public:
     int refCount;
 };
 
+typedef JsExecStateInfo* jsExecState;
+static Vector<jsExecState>* s_execStates = nullptr;
+
 typedef WTF::HashMap<jsValue, WkeJsValue*> JsValueMap;
 static JsValueMap* s_jsValueMap = nullptr;
+
+static void ensureStaticVar()
+{
+    if (!s_jsValueMap)
+        s_jsValueMap = new JsValueMap();
+
+    if (!s_execStates)
+        s_execStates = new Vector<jsExecState>();
+}
+
+JsExecStateInfo* JsExecStateInfo::create()
+{
+    ensureStaticVar();
+
+    JsExecStateInfo* retVal = new JsExecStateInfo();
+    s_execStates->append(retVal);
+    return retVal;
+}
 
 static JsValueMap::iterator findJsValueMap(jsValue value)
 {
@@ -381,7 +394,8 @@ bool jsIsTrue(jsValue v)
         v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeValue->isolate, wkeValue->value);
         if (!value->IsBoolean())
             return false;
-        v8::Local<v8::Boolean> boolValue = value->ToBoolean();
+
+        v8::Local<v8::Boolean> boolValue = value->ToBoolean(wkeValue->isolate);
         return boolValue->Value();
     }
 
@@ -407,7 +421,7 @@ int jsToInt(jsExecState es, jsValue v)
         v8::Isolate* isolate = wkeValue->isolate;
         v8::HandleScope handleScope(isolate);
         v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeValue->isolate, wkeValue->value);
-        return value->ToInt32()->Value();
+        return value->ToInt32(isolate)->Value();
     } else if (WkeJsValue::wkeJsValueInt == wkeValue->type) {
         return wkeValue->intVal;
     } else if (WkeJsValue::wkeJsValueDouble == wkeValue->type) {
@@ -457,7 +471,7 @@ bool jsToBoolean(jsExecState es, jsValue v)
         v8::Isolate* isolate = wkeValue->isolate;
         v8::HandleScope handleScope(isolate);
         v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeValue->isolate, wkeValue->value);
-        return value->ToBoolean()->Value();
+        return value->ToBoolean(isolate)->Value();
     } else if (WkeJsValue::wkeJsValueBool == wkeValue->type)
         return wkeValue->boolVal;
 
@@ -501,7 +515,7 @@ const utf8* jsToTempString(jsExecState es, jsValue v)
 //         if (!value->IsString())
 //             return "";
 
-        v8::Local<v8::String> stringValue = value->ToString();
+        v8::Local<v8::String> stringValue = value->ToString(isolate);
         String stringWTF = blink::v8StringToWebCoreString<String>(stringValue, blink::DoNotExternalize);
 
         sharedStringBuffer = WTF::ensureStringToUTF8(stringWTF, false);
@@ -802,11 +816,15 @@ jsValue jsEvalExW(jsExecState es, const wchar_t* str, bool isInClosure)
     v8::MaybeLocal<v8::String> source = v8::String::NewFromUtf8(isolate, WTF::ensureStringToUTF8(codeString, true).data(), v8::NewStringType::kNormal);
     if (source.IsEmpty())
         return jsUndefined();
-    v8::Local<v8::Script> script = v8::Script::Compile(source.ToLocalChecked());
-    v8::TryCatch trycatch;
-    v8::Local<v8::Value> result = script->Run();
 
-    //return wke::v8ValueToJsValue(context, result);
+    v8::MaybeLocal<v8::Script> maybeScript = v8::Script::Compile(context, source.ToLocalChecked());
+    if (maybeScript.IsEmpty())
+        return jsUndefined();
+
+    v8::Local<v8::Script> script = maybeScript.ToLocalChecked();
+    v8::TryCatch trycatch(isolate);
+    v8::Local<v8::Value> result = script->Run(context).FromMaybe(v8::Local<v8::Value>());
+
     return createJsValueByLocalValue(isolate, context, result);
 }
 
@@ -849,7 +867,7 @@ static std::string* saveCallstack(v8::Local<v8::StackTrace> stackTrace)
     int count = stackTrace->GetFrameCount();
 
     for (int i = 0; i < count; ++i) {
-        v8::Local<v8::StackFrame> stackFrame = stackTrace->GetFrame(i);
+        v8::Local<v8::StackFrame> stackFrame = stackTrace->GetFrame(v8::Isolate::GetCurrent(), i);
         int frameCount = stackTrace->GetFrameCount();
         int line = stackFrame->GetLineNumber();
         v8::Local<v8::String> scriptName = stackFrame->GetScriptNameOrSourceURL();
@@ -859,12 +877,12 @@ static std::string* saveCallstack(v8::Local<v8::StackTrace> stackTrace)
         std::string funcNameWTF;
 
         if (!scriptName.IsEmpty()) {
-            v8::String::Utf8Value scriptNameUtf8(scriptName);
+            v8::String::Utf8Value scriptNameUtf8(v8::Isolate::GetCurrent(), scriptName);
             scriptNameWTF = *scriptNameUtf8;
         }
 
         if (!funcName.IsEmpty()) {
-            v8::String::Utf8Value funcNameUtf8(funcName);
+            v8::String::Utf8Value funcNameUtf8(v8::Isolate::GetCurrent(), funcName);
             funcNameWTF = *funcNameUtf8;
         }
         std::vector<char> output;
@@ -920,7 +938,7 @@ jsValue jsCall(jsExecState es, jsValue func, jsValue thisValue, jsValue* args, i
     if (thisValueV8.IsEmpty() || thisValueV8->IsUndefined())
         thisValueV8 = context->Global();
 
-    v8::TryCatch tryCatch;
+    v8::TryCatch tryCatch(isolate);
     tryCatch.SetVerbose(true);
 
     v8::MaybeLocal<v8::Value> ret = cb->Call(context, thisValueV8, argCount, argv);
@@ -991,9 +1009,8 @@ jsValue jsGet(jsExecState es, jsValue object, const char* prop)
     if (value.IsEmpty() || !value->IsObject())
         return jsUndefined();
 
-    v8::Local<v8::Object> obj = value->ToObject();
-
-    v8::TryCatch tryCatch;
+    v8::Local<v8::Object> obj = value->ToObject(isolate);
+    v8::TryCatch tryCatch(isolate);
     tryCatch.SetVerbose(true);
 
     v8::MaybeLocal<v8::String> propV8 = v8::String::NewFromUtf8(isolate, prop, v8::NewStringType::kNormal, -1);
@@ -1026,9 +1043,8 @@ void jsSet(jsExecState es, jsValue object, const char* prop, jsValue value)
     if (valueLocal.IsEmpty())
         return;
     
-    v8::Local<v8::Object> obj = objectLocal->ToObject();
-
-    v8::TryCatch tryCatch;
+    v8::Local<v8::Object> obj = objectLocal->ToObject(isolate);
+    v8::TryCatch tryCatch(isolate);
     tryCatch.SetVerbose(true);
 
     v8::MaybeLocal<v8::String> propV8 = v8::String::NewFromUtf8(isolate, prop, v8::NewStringType::kNormal, -1);
@@ -1064,11 +1080,12 @@ void jsDeleteObjectProp(jsExecState es, jsValue object, const char* prop)
     if (objectLocal.IsEmpty() || !objectLocal->IsObject())
         return;
 
-    v8::Local<v8::Object> obj = objectLocal->ToObject();
+    v8::Local<v8::Object> obj = objectLocal->ToObject(isolate);
     v8::MaybeLocal<v8::String> propV8 = v8::String::NewFromUtf8(isolate, prop, v8::NewStringType::kNormal, -1);
     if (propV8.IsEmpty())
         return;
-    obj->Delete(propV8.ToLocalChecked());
+
+    obj->Delete(context, propV8.ToLocalChecked());
 }
 
 bool jsIsValidExecState(jsExecState es)
@@ -1113,7 +1130,7 @@ jsValue jsGetAt(jsExecState es, jsValue object, int index)
     if (retValue.IsEmpty())
         return jsUndefined();
 
-    v8::TryCatch tryCatch;
+    v8::TryCatch tryCatch(isolate);
     tryCatch.SetVerbose(true);
     if (tryCatch.HasCaught() || retValue.IsEmpty())
         return jsUndefined();
@@ -1160,17 +1177,18 @@ jsKeys* jsGetKeys(jsExecState es, jsValue object)
     v8::Context::Scope contextScope(context);
 
     v8::Local<v8::Value> value = getV8Value(object, context);
-    v8::Local<v8::Object> obj = value->ToObject();
+    v8::Local<v8::Object> obj = value->ToObject(isolate);
+    v8::Local<v8::Array> arrKeys = obj->GetPropertyNames(context).FromMaybe(v8::Local<v8::Array>());
 
-    v8::Local<v8::Array> arrKeys = obj->GetPropertyNames();
     if (0 == arrKeys->Length())
         return nullptr;
     jsKeys* result = wke::createTempJsKeys(arrKeys->Length());
     
     for (uint32_t i = 0; i < result->length; ++i) {
         v8::Local<v8::Value> value = arrKeys->Get(v8::Integer::New(isolate, i));
-        v8::Local<v8::String> str = value->ToString();
-        v8::String::Utf8Value strUtf8(str);
+        v8::Local<v8::String> str = value->ToString(isolate);
+        v8::String::Utf8Value strUtf8(isolate, str);
+
         if (0 == strUtf8.length())
             continue;
         char* keyPtr = new char[strUtf8.length() + 1];
@@ -1359,7 +1377,7 @@ static void addFunction(v8::Local<v8::Context> context, const char* name, wkeJsN
     tmpl->SetCallHandler(functionCallbackImpl, data);
 
     // Retrieve the function object and set the name.
-    v8::Local<v8::Function> func = tmpl->GetFunction();
+    v8::Local<v8::Function> func = tmpl->GetFunction(context).FromMaybe(v8::Local<v8::Function>());
     if (func.IsEmpty())
         return;
     
@@ -1516,7 +1534,7 @@ static void addAccessor(v8::Local<v8::Context> context, const char* name, wkeJsN
     v8::Context::Scope contextScope(context);
     v8::Local<v8::Object> globalObj = v8::Local<v8::Object>::Cast(context->Global()->GetPrototype());
 
-    v8::TryCatch tryCatch;
+    v8::TryCatch tryCatch(isolate);
     tryCatch.SetVerbose(true);
 
     v8::MaybeLocal<v8::String> nameMaybeLocal = v8::String::NewFromUtf8(isolate, name, v8::NewStringType::kNormal, -1);
@@ -1827,7 +1845,7 @@ jsData* jsGetData(jsExecState es, jsValue value)
         if (!valueV8->IsObject())
             return nullptr;
 
-        v8::Local<v8::Object> obj = valueV8->ToObject();
+        v8::Local<v8::Object> obj = valueV8->ToObject(isolate);
         external = blink::V8HiddenValue::getHiddenValue(isolate, obj, v8::String::NewFromUtf8(isolate, "wkeJsData", v8::NewStringType::kNormal, -1).ToLocalChecked());
         if (external.IsEmpty() || !external->IsExternal())
             return nullptr;
@@ -1892,10 +1910,7 @@ void onCreateGlobalObjectInMainFrame(content::WebFrameClientImpl* client, blink:
     if (!wkeWebView)
         return;
 
-    if (!s_jsValueMap)
-        s_jsValueMap = new JsValueMap();
-    if (!s_execStates)
-        s_execStates = new Vector<jsExecState>();
+    ensureStaticVar();
     
     v8::Isolate* isolate = context->GetIsolate();
     setWkeWebViewToV8Context(client, context);
@@ -1994,7 +2009,7 @@ void onReleaseGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalF
 
             v8::Local<v8::Value> value = v8::Local<v8::Value>::New(wkeJsValue->isolate, wkeJsValue->value);
             if (value.IsEmpty() && value->IsObject()) {
-                v8::Local<v8::Object> obj = value->ToObject();
+                v8::Local<v8::Object> obj = value->ToObject(isolate);
                 blink::V8HiddenValue::deleteHiddenValue(isolate, obj, v8::String::NewFromUtf8(isolate, "wkeJsData", v8::NewStringType::kNormal, -1).ToLocalChecked());
             }
 
@@ -2008,10 +2023,14 @@ void onReleaseGlobalObject(content::WebFrameClientImpl* client, blink::WebLocalF
 AutoDisableFreeV8TempObejct::AutoDisableFreeV8TempObejct()
 {
     ++m_disableCount;
+    content::WebThreadImpl* threadImpl = (content::WebThreadImpl*)blink::Platform::current()->currentThread();
+    threadImpl->disableScheduler();
 }
 
 AutoDisableFreeV8TempObejct::~AutoDisableFreeV8TempObejct()
 {
+    content::WebThreadImpl* threadImpl = (content::WebThreadImpl*)blink::Platform::current()->currentThread();
+    threadImpl->enableScheduler();
     --m_disableCount;
 }
 
@@ -2080,13 +2099,13 @@ jsValue v8ValueToJsValue(v8::Local<v8::Context> context, v8::Local<v8::Value> v8
         //return wke::createJsValueString(context, "Object");
         return createJsValueByLocalValue(context->GetIsolate(), context, v8Value);
     } else if (v8Value->IsInt32()) {
-        v8::Local<v8::Int32> v8Number = v8Value->ToInt32();
+        v8::Local<v8::Int32> v8Number = v8Value->ToInt32(context->GetIsolate());
         return jsInt(v8Number->Value());
     } else if (v8Value->IsUint32()) {
-        v8::Local<v8::Uint32> v8Number = v8Value->ToUint32();
+        v8::Local<v8::Uint32> v8Number = v8Value->ToUint32(context).FromMaybe(v8::Local<v8::Uint32>());
         return jsInt(v8Number->Value());
     } else if (v8Value->IsNumber()) {
-        v8::Local<v8::Number> v8Number = v8Value->ToNumber();
+        v8::Local<v8::Number> v8Number = v8Value->ToNumber(context->GetIsolate());
         return jsDouble(v8Number->Value());
     }
 
@@ -2119,23 +2138,24 @@ void recordJsExceptionInfo(const v8::TryCatch& tryCatch)
         return;
     }
 
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
     if (!g_jsExceptionInfo)
         g_jsExceptionInfo = new jsExceptionInfo();
 
     v8::Local<v8::Message> message = tryCatch.Message();
-
-    v8::String::Utf8Value messageUtf8(message->Get());
+    v8::String::Utf8Value messageUtf8(isolate, message->Get());
     g_jsExceptionInfo->message = strDupWithLengthLimit(*messageUtf8, messageUtf8.length());
 
-    v8::String::Utf8Value sourceLineUtf8(message->GetSourceLine());
+    v8::String::Utf8Value sourceLineUtf8(isolate, message->GetSourceLine(isolate->GetCurrentContext()).FromMaybe(v8::Local<v8::Value>()));
     g_jsExceptionInfo->sourceLine = strDupWithLengthLimit(*sourceLineUtf8, sourceLineUtf8.length());
 
     if (!message->GetScriptResourceName().IsEmpty()) {
-        v8::String::Utf8Value scriptResourceNameUtf8(message->GetScriptResourceName()->ToString());
+        v8::String::Utf8Value scriptResourceNameUtf8(isolate, message->GetScriptResourceName()->ToString(isolate));
         g_jsExceptionInfo->scriptResourceName = strDupWithLengthLimit(*scriptResourceNameUtf8, scriptResourceNameUtf8.length());
     } else
         g_jsExceptionInfo->scriptResourceName = mallocEmpty();
-    g_jsExceptionInfo->lineNumber = message->GetLineNumber();
+
+    g_jsExceptionInfo->lineNumber = message->GetLineNumber(isolate->GetCurrentContext()).FromJust();
     g_jsExceptionInfo->startPosition = message->GetStartPosition();
     g_jsExceptionInfo->endPosition = message->GetEndPosition();
     g_jsExceptionInfo->startColumn = message->GetStartColumn();
