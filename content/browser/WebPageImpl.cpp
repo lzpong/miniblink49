@@ -116,7 +116,7 @@ WebPageImpl::WebPageImpl(COLORREF bdColor)
     m_state = pageUninited;
     m_platformEventHandler = nullptr;
     m_postMouseLeave = false;
-    m_needsCommit = 0;
+    //m_needsCommit = 0;
     m_commitCount = 0;
     m_needsLayout = 1;
     m_layerDirty = 1;
@@ -135,7 +135,6 @@ WebPageImpl::WebPageImpl(COLORREF bdColor)
     m_devToolsAgent = nullptr;
     m_isEnterDebugLoop = false;
     m_draggableRegion = ::CreateRectRgn(0, 0, 0, 0); // Create a HRGN representing the draggable window area.
-    m_pageNetExtraData = nullptr;
 
     WebPageImpl* self = this;
     m_dragHandle = new DragHandle(
@@ -642,40 +641,25 @@ public:
             return;
         
         atomicDecrement(&m_client->m_commitCount);
-        if (!doRun())
-            m_client->clearNeedsCommit();
+        m_client->beginMainFrame();
     }
 
 private:
-    bool doRun()
-    {
-        m_client->beginMainFrame();
-        return true;
-    }
-
     WebPageImpl* m_client;
 };
 
 void WebPageImpl::setNeedsCommitAndNotLayout()
 {
-    if (0 != m_needsCommit)
-        return;
-    atomicIncrement(&m_needsCommit);
+//     if (0 != m_needsCommit)
+//         return;
+//     atomicIncrement(&m_needsCommit);
 
-#if 0 // (defined ENABLE_CEF) && (ENABLE_CEF == 1)
-    if (m_browser) {
-        m_browser->SetNeedHeartbeat();
-    } else {
-#endif
-        if (0 == m_commitCount) {
-            atomicIncrement(&m_commitCount);
-            blink::Platform* platfrom = blink::Platform::current();
-            WebThreadImpl* threadImpl = (WebThreadImpl*)platfrom->mainThread();
-            threadImpl->postTask(FROM_HERE, new CommitTask(this));
-        }
-#if 0 // (defined ENABLE_CEF) && (ENABLE_CEF == 1)
+    if (0 == m_commitCount) {
+        atomicIncrement(&m_commitCount);
+        blink::Platform* platfrom = blink::Platform::current();
+        WebThreadImpl* threadImpl = (WebThreadImpl*)platfrom->mainThread();
+        threadImpl->postTask(FROM_HERE, new CommitTask(this));
     }
-#endif
 }
 
 void WebPageImpl::setNeedsCommit()
@@ -684,30 +668,13 @@ void WebPageImpl::setNeedsCommit()
     setNeedsCommitAndNotLayout();
 }
 
-void WebPageImpl::clearNeedsCommit()
-{
-    atomicDecrement(&m_needsCommit);
-}
-
-void WebPageImpl::onLayerTreeDirty()
-{
-    InterlockedExchange(reinterpret_cast<long volatile*>(&m_layerDirty), 1);
-    setNeedsCommitAndNotLayout();
-}
-
-void WebPageImpl::didUpdateLayout()
-{
-    //onLayerTreeDirty();
-    setNeedsCommit();
-}
-
 void WebPageImpl::beginMainFrame()
 {
-    bool needsCommit = m_needsCommit;
+    //bool needsCommit = m_needsCommit;
     if (pageInited != m_state)
         return;
 
-    if (needsCommit) {
+    if (/*needsCommit*/true) {
         executeMainFrame();
         m_layerTreeHost->requestDrawFrameToRunIntoCompositeThread();
     }
@@ -716,7 +683,7 @@ void WebPageImpl::beginMainFrame()
 void WebPageImpl::executeMainFrame()
 {
     freeV8TempObejctOnOneFrameBefore();
-    clearNeedsCommit();
+    //atomicDecrement(&m_needsCommit);
 
     if (0 != m_executeMainFrameCount || m_isEnterDebugLoop)
         return;
@@ -745,6 +712,17 @@ void WebPageImpl::executeMainFrame()
     }
 #endif
     atomicDecrement(&m_executeMainFrameCount);
+}
+
+void WebPageImpl::onLayerTreeDirty()
+{
+    InterlockedExchange(reinterpret_cast<long volatile*>(&m_layerDirty), 1);
+    setNeedsCommitAndNotLayout();
+}
+
+void WebPageImpl::didUpdateLayout()
+{
+    setNeedsCommit();
 }
 
 bool WebPageImpl::fireTimerEvent()
@@ -1662,6 +1640,7 @@ void WebPageImpl::setBackgroundColor(COLORREF c)
 
 void WebPageImpl::setHwndRenderOffset(const blink::IntPoint& offset)
 {
+    m_hwndRenderOffset = offset;
     m_platformEventHandler->setHwndRenderOffset(offset);
 }
 
@@ -1686,7 +1665,7 @@ struct RegisterDragDropTask {
         m_dragHandle = dragHandle;
     }
 
-    static void registerDragDropInUiThread(HWND hWnd, void* param)
+    static void WKE_CALL_TYPE registerDragDropInUiThread(HWND hWnd, void* param)
     {
         ::OleInitialize(nullptr);
 
@@ -1754,7 +1733,7 @@ public:
         }
     }
 
-    static int uiThreadPostTaskCallback(HWND hWnd, wkeUiThreadRunCallback callback, void* param)
+    static int WKE_CALL_TYPE uiThreadPostTaskCallback(HWND hWnd, wkeUiThreadRunCallback callback, void* param)
     {
         PostTaskWrap* task = new PostTaskWrap(hWnd, callback, param);
 
@@ -1879,15 +1858,6 @@ WebStorageNamespace* WebPageImpl::createSessionStorageNamespace()
 {
     return ((content::BlinkPlatformImpl*)Platform::current())->createSessionStorageNamespace();
 }
-
-#ifndef MINIBLINK_NO_PAGE_LOCALSTORAGE
-WebStorageNamespace* WebPageImpl::createLocalStorageNamespace()
-{
-    if (!m_pageNetExtraData)
-        m_pageNetExtraData = new net::PageNetExtraData();
-    return m_pageNetExtraData->createWebStorageNamespace();
-}
-#endif
 
 WebString WebPageImpl::acceptLanguages()
 {
@@ -2104,36 +2074,6 @@ void WebPageImpl::didExitDebugLoop()
 
     if (m_devToolsClient)
         m_webViewImpl->setIgnoreInputEvents(true);
-}
-
-void WebPageImpl::setCookieJarFullPath(const char* path)
-{
-    if (!m_pageNetExtraData)
-        m_pageNetExtraData = new net::PageNetExtraData();
-    m_pageNetExtraData->setCookieJarFullPath(path);
-}
-
-void WebPageImpl::setLocalStorageFullPath(const char* path)
-{
-    if (!m_pageNetExtraData)
-        m_pageNetExtraData = new net::PageNetExtraData();
-    m_pageNetExtraData->setLocalStorageFullPath(path);
-}
-
-net::WebCookieJarImpl* WebPageImpl::getCookieJar()
-{
-    net::WebURLLoaderManager* manager = net::WebURLLoaderManager::sharedInstance();
-    if (!manager)
-        return nullptr;
-
-    net::WebCookieJarImpl* netManagerCookie = manager->getShareCookieJar();
-    if (!m_pageNetExtraData)
-        return netManagerCookie;
-
-    net::WebCookieJarImpl* pageCookie = m_pageNetExtraData->getCookieJar();
-    if (!pageCookie)
-        return netManagerCookie;
-    return pageCookie;
 }
 
 bool WebPageImpl::initSetting()

@@ -381,15 +381,15 @@ void WebURLLoaderManager::handleDidFail(WebURLLoaderInternal* job, const blink::
     if (WebURLLoaderInternal::kCacheForDownloadYes != job->m_cacheForDownloadOpt)
         job->client()->didFail(job->loader(), error);
 
-	RequestExtraData* requestExtraData = reinterpret_cast<RequestExtraData*>(job->firstRequest()->extraData());
-	WebPage* page = requestExtraData->page;
-	if (page) {
-		wkeLoadUrlFailCallback loadUrlFailCallback = page->wkeHandler().loadUrlFailCallback;
-		void* loadUrlFailCallbackParam = page->wkeHandler().loadUrlFailCallbackParam;
-		Vector<char> urlBuf = WTF::ensureStringToUTF8(job->firstRequest()->url().string(), true);
-		if (loadUrlFailCallback)
-			loadUrlFailCallback(page->wkeWebView(), loadUrlFailCallbackParam, urlBuf.data(), job);
-	}
+    RequestExtraData* requestExtraData = reinterpret_cast<RequestExtraData*>(job->firstRequest()->extraData());
+    WebPage* page = requestExtraData->page;
+    if (page) {
+        wkeLoadUrlFailCallback loadUrlFailCallback = page->wkeHandler().loadUrlFailCallback;
+        void* loadUrlFailCallbackParam = page->wkeHandler().loadUrlFailCallbackParam;
+        Vector<char> urlBuf = WTF::ensureStringToUTF8(job->firstRequest()->url().string(), true);
+        if (loadUrlFailCallback)
+            loadUrlFailCallback(page->wkeWebView(), loadUrlFailCallbackParam, urlBuf.data(), job);
+    }
 }
 
 static void cancelBodyStreaming(int jobId)
@@ -462,7 +462,7 @@ static size_t writeCallbackOnIoThread(void* ptr, size_t size, size_t nmemb, void
     // of html page even if it is a redirect that was handled internally
     // can be observed e.g. on gmail.com
     long httpCode = 0;
-    CURLcode err = curl_easy_getinfo(job->m_handle, !job->m_isProxy ? CURLINFO_RESPONSE_CODE : CURLINFO_HTTP_CONNECTCODE, &httpCode);
+    CURLcode err = curl_easy_getinfo(job->m_handle, !job->m_isProxyConnect ? CURLINFO_RESPONSE_CODE : CURLINFO_HTTP_CONNECTCODE, &httpCode);
     if (CURLE_OK == err && httpCode >= 300 && httpCode < 400)
         return totalSize;
 
@@ -1442,8 +1442,6 @@ InitializeHandleInfo* WebURLLoaderManager::preInitializeHandleOnMainThread(WebUR
     if (0 != wkeNetInterface.length()) {
         info->wkeNetInterface = wkeNetInterface.utf8().data();
     }
-    RefPtr<net::PageNetExtraData> pageNetExtraData = page->getPageNetExtraData();
-    info->pageNetExtraData = pageNetExtraData;
 #endif
 
     return info;
@@ -1480,12 +1478,7 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
     curl_easy_setopt(job->m_handle, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(job->m_handle, CURLOPT_MAXREDIRS, 10);
     curl_easy_setopt(job->m_handle, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
-
-    if (info->pageNetExtraData && info->pageNetExtraData->getCurlShareHandle()) {
-        curl_easy_setopt(job->m_handle, CURLOPT_SHARE, info->pageNetExtraData->getCurlShareHandle());
-        job->m_pageNetExtraData = info->pageNetExtraData;
-    } else
-        curl_easy_setopt(job->m_handle, CURLOPT_SHARE, m_shareCookieJar->getCurlShareHandle());
+    curl_easy_setopt(job->m_handle, CURLOPT_SHARE, m_shareCookieJar->getCurlShareHandle());
     curl_easy_setopt(job->m_handle, CURLOPT_DNS_CACHE_TIMEOUT, 60 * 5); // 5 minutes
     curl_easy_setopt(job->m_handle, CURLOPT_PROTOCOLS, kAllowedProtocols);
     curl_easy_setopt(job->m_handle, CURLOPT_REDIR_PROTOCOLS, kAllowedProtocols);
@@ -1509,11 +1502,7 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
     WTF::Locker<WTF::Mutex> locker(*mutex);
 
     std::string cookieJarFullPath;
-    if (job->m_pageNetExtraData) {
-        cookieJarFullPath = job->m_pageNetExtraData->getCookieJarFullPath();
-    } else {
-        cookieJarFullPath = m_shareCookieJar->getCookieJarFullPath();
-    }
+    cookieJarFullPath = m_shareCookieJar->getCookieJarFullPath();
     
     if (!cookieJarFullPath.empty()) {
         curl_easy_setopt(job->m_handle, CURLOPT_COOKIEJAR, cookieJarFullPath.c_str());
@@ -1545,6 +1534,8 @@ void WebURLLoaderManager::initializeHandleOnIoThread(int jobId, InitializeHandle
 #if (defined ENABLE_WKE) && (ENABLE_WKE == 1)
     if (info->proxy.size()) {
         job->m_isProxy = true;
+        if(info->url.find("https") == 0)
+            job->m_isProxyConnect = true;
         curl_easy_setopt(job->m_handle, CURLOPT_PROXY, info->proxy.c_str());
         curl_easy_setopt(job->m_handle, CURLOPT_PROXYTYPE, info->proxyType);
     }  
@@ -1693,6 +1684,7 @@ WebURLLoaderInternal::WebURLLoaderInternal(WebURLLoaderImplCurl* loader, const W
     m_isBlackList = false;
     m_isDataUrl = false;
     m_isProxy = false;
+    m_isProxyConnect = false;
     m_isProxyHeadRequest = false;
     m_needParseMime = true;
     m_isHoldJobToAsynCommit = false;

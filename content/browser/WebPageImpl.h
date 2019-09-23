@@ -91,9 +91,6 @@ public:
     virtual void initializeLayerTreeView() override;
     virtual blink::WebWidget* createPopupMenu(blink::WebPopupType) override;
     virtual blink::WebStorageNamespace* createSessionStorageNamespace() override;
-#ifndef MINIBLINK_NO_PAGE_LOCALSTORAGE
-    virtual blink::WebStorageNamespace* createLocalStorageNamespace() override;
-#endif
     virtual blink::WebString acceptLanguages() override;
     void setScreenInfo(const blink::WebScreenInfo& info);
     virtual blink::WebScreenInfo screenInfo() override;
@@ -170,10 +167,11 @@ public:
 
     void showDebugNodeData();
 
-    bool needsCommit() const { return m_needsCommit; }
+    //bool needsCommit() const { return m_needsCommit; }
+    bool needsCommit() const { return m_commitCount > 0; }
     void setNeedsCommit();
     void setNeedsCommitAndNotLayout();
-    void clearNeedsCommit();
+    //void clearNeedsCommit();
     bool isDrawDirty();
 
     // LayerTreeHostUiThreadClient --------------------------------------------------------
@@ -243,13 +241,6 @@ public:
     void setHwndRenderOffset(const blink::IntPoint& offset);
     blink::IntPoint getHwndRenderOffset() const;
 
-    void setCookieJarFullPath(const char* path);
-    void setLocalStorageFullPath(const char* path);
-
-    net::WebCookieJarImpl* getCookieJar();
-
-    RefPtr<net::PageNetExtraData> m_pageNetExtraData;
-
     static int64_t m_firstFrameId;
 
     blink::WebThread::TaskObserver* m_createDevToolsAgentTaskObserver;
@@ -299,12 +290,11 @@ public:
     bool m_postCloseWidgetSoonMessage;
 
     WTF::Vector<DestroyNotif*> m_destroyNotifs;
-    //WTF::Vector<blink::IntRect> m_dragRegions;
     HRGN m_draggableRegion;
 
     HWND m_popupHandle;
     int m_debugCount;
-    int m_needsCommit;
+    //int m_needsCommit;
     int m_commitCount;
     int m_needsLayout;
     int m_layerDirty;
